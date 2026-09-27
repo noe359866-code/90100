@@ -73,6 +73,11 @@ jobs:
           # --- Ajustes opcionales (Repository variables; ver .env.example) ---
           TABLE_NAME: ${{ vars.TABLE_NAME || 'torrents' }}
           CLEAN_TITLE_COLUMN: ${{ vars.CLEAN_TITLE_COLUMN || 'title_text' }}
+          # Límites de tasa de las APIs (AniList es el más estricto: ~30 req/min)
+          ANILIST_RPM: ${{ vars.ANILIST_RPM || '20' }}
+          ANILIST_MIN_RPM: ${{ vars.ANILIST_MIN_RPM || '5' }}
+          KITSU_RPM: ${{ vars.KITSU_RPM || '90' }}
+          KITSU_MIN_RPM: ${{ vars.KITSU_MIN_RPM || '15' }}
           MIN_MOVIE_MB: ${{ vars.MIN_MOVIE_MB || '150' }}
           MIN_SERIES_MB: ${{ vars.MIN_SERIES_MB || '30' }}
           DEAD_AFTER_DAYS: ${{ vars.DEAD_AFTER_DAYS || '30' }}

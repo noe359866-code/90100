@@ -11,22 +11,50 @@ import { bestSimilarity } from '../utils/text.js';
 const BASE = 'https://kitsu.io/api/edge';
 const HEADERS = { Accept: 'application/vnd.api+json', 'Content-Type': 'application/vnd.api+json' };
 
-export function createKitsuClient({ requestsPerMinute = 90, log } = {}) {
-  const limiter = createRateLimiter({ maxRequests: requestsPerMinute, perMs: 60_000 });
+export function createKitsuClient({
+  requestsPerMinute = 90,
+  minRequestsPerMinute = 15,
+  cooldownMs,
+  maxConsecutiveThrottles,
+  disableMs,
+  log,
+} = {}) {
+  const limiter = createRateLimiter({
+    maxRequests: requestsPerMinute,
+    perMs: 60_000,
+    minRequests: minRequestsPerMinute,
+    baseCooldownMs: cooldownMs,
+    maxConsecutiveThrottles,
+    disableMs,
+    name: 'Kitsu',
+    log,
+  });
   const cache = new Map();
 
   const get = (url) => {
     if (cache.has(url)) return cache.get(url);
-    const p = limiter(() =>
+    const promise = limiter(() =>
       fetchJson(url, {
         headers: HEADERS,
         timeoutMs: 15000,
         retries: 3,
+        onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
         onRetry: (err, attempt, wait) => log?.warn(`Kitsu: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
       }),
+    ).then(
+      (json) => {
+        limiter.reportSuccess?.();
+        return json;
+      },
+      // Un fallo NO se cachea (mismo razonamiento que en AniList).
+      (err) => {
+        cache.delete(url);
+        throw err;
+      },
     );
-    cache.set(url, p);
-    return p;
+    cache.set(url, promise);
+    promise.catch(() => {});
+    return promise;
   };
 
   /** Resuelve kitsu_id a partir de un ID externo (anilist/anime, myanimelist/anime). */
@@ -81,5 +109,5 @@ export function createKitsuClient({ requestsPerMinute = 90, log } = {}) {
     return null;
   }
 
-  return { byAniListId, byMalId, findBest };
+  return { byAniListId, byMalId, findBest, stats: () => limiter.stats() };
 }

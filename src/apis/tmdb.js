@@ -45,11 +45,11 @@ export async function validateTmdbKey(apiKey, { timeoutMs = 10000 } = {}) {
   }
 }
 
-export function createTmdbClient({ apiKey, requestsPerSecond = 20, log } = {}) {
+export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, maxConsecutiveThrottles, disableMs, log } = {}) {
   const key = String(apiKey ?? '').trim();
   if (!key) return null;
   const isBearer = tmdbKeyKind(key) === 'v4';
-  const limiter = createRateLimiter({ maxRequests: requestsPerSecond, perMs: 1000 });
+  const limiter = createRateLimiter({ maxRequests: requestsPerSecond, perMs: 1000, name: 'TMDB', baseCooldownMs: cooldownMs, maxConsecutiveThrottles, disableMs, log });
   const cache = new Map();
 
   const get = (path, params = {}) => {
@@ -58,16 +58,28 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, log } = {}) {
     if (!isBearer) url.searchParams.set('api_key', key);
     const cacheKey = url.toString();
     if (cache.has(cacheKey)) return cache.get(cacheKey);
-    const p = limiter(() =>
+    const promise = limiter(() =>
       fetchJson(cacheKey, {
         headers: isBearer ? { Authorization: `Bearer ${key}` } : {},
         timeoutMs: 15000,
         retries: 3,
+        onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
         onRetry: (err, attempt, wait) => log?.warn(`TMDB: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
       }),
+    ).then(
+      (json) => {
+        limiter.reportSuccess?.();
+        return json;
+      },
+      // Un fallo NO se cachea (mismo razonamiento que en AniList/Kitsu).
+      (err) => {
+        cache.delete(cacheKey);
+        throw err;
+      },
     );
-    cache.set(key, p);
-    return p;
+    cache.set(cacheKey, promise);
+    promise.catch(() => {});
+    return promise;
   };
 
   /**
@@ -128,5 +140,5 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, log } = {}) {
     }
   }
 
-  return { findBest, externalIds };
+  return { findBest, externalIds, stats: () => limiter.stats() };
 }

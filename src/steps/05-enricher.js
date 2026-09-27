@@ -57,7 +57,10 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   if (group.type === 'anime') {
     // --- AniList ---
     let englishTitle = null;
-    if (need('anilist_id') || need('mal_id')) {
+    // Si AniList nos ha cerrado el grifo por rate limit, no insistimos: esa obra
+    // se queda sin resolver y se reintentará en la próxima ejecución.
+    const anilistBlocked = anilist?.stats?.().disabled === true;
+    if (!anilistBlocked && (need('anilist_id') || need('mal_id'))) {
       const hit = await anilist.findBest(variants, { year, minSimilarity });
       if (hit) {
         if (need('anilist_id')) found.anilist_id = hit.anilist_id;
@@ -134,8 +137,16 @@ export async function runEnricher(db, config, log, deps = {}) {
     log.warn('Si la definiste en GitHub: revisa que el secret se llame exactamente TMDB_API_KEY, esté en la pestaña Secrets (no en Variables ni en un Environment sin declarar en el job) y relanza el workflow.');
   }
 
-  const anilist = deps.anilist || createAniListClient({ requestsPerMinute: config.enrich.anilistPerMinute, log });
-  const kitsu = deps.kitsu || createKitsuClient({ requestsPerMinute: config.enrich.kitsuPerMinute, log });
+  const anilist = deps.anilist || createAniListClient({
+    requestsPerMinute: config.enrich.anilistPerMinute,
+    minRequestsPerMinute: config.enrich.anilistMinPerMinute,
+    log,
+  });
+  const kitsu = deps.kitsu || createKitsuClient({
+    requestsPerMinute: config.enrich.kitsuPerMinute,
+    minRequestsPerMinute: config.enrich.kitsuMinPerMinute,
+    log,
+  });
   const tmdb = deps.tmdb || createTmdbClient({ apiKey: config.enrich.tmdbApiKey, requestsPerSecond: config.enrich.tmdbPerSecond, log });
 
   const cleanCol = config.cleanTitleColumn;
@@ -225,26 +236,54 @@ export async function runEnricher(db, config, log, deps = {}) {
   let resolved = 0;
   let unresolved = 0;
   let failures = 0;
+  let rateLimited = 0;
+  let rateLimitWarned = false;
   await mapWithConcurrency(selected, config.enrich.concurrency, async (g) => {
+    // ¿Alguna API está en pausa por rate limit? Entonces muchas obras se quedarán
+    // sin resolver sin que sea un fallo del script.
+    const blocked = [anilist, kitsu, tmdb].some((c) => c?.stats?.().disabled);
     try {
       const found = await resolveWork(g, { anilist, kitsu, tmdb, config, log });
       const ids = { ...g.known, ...found };
       if (Object.keys(found).length) {
         resolved += 1;
         applyToRows(g, ids);
+      } else if (blocked) {
+        rateLimited += 1;
+        if (!rateLimitWarned) {
+          rateLimitWarned = true;
+          log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
+        }
       } else {
         unresolved += 1;
         if (g.known && Object.values(g.known).some((v) => !isMissing(v))) applyToRows(g, ids);
       }
     } catch (err) {
       failures += 1;
-      log.warn(`enricher: error resolviendo "${g.label}": ${err.message}`);
+      if (err?.code === 'ERR_RATE_LIMITED') {
+        rateLimited += 1;
+        if (!rateLimitWarned) {
+          rateLimitWarned = true;
+          log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
+        }
+      } else {
+        log.warn(`enricher: error resolviendo "${g.label}": ${err.message}`);
+      }
     }
   });
 
   // --- 4. Persistencia ----------------------------------------------------------------
   const updated = await db.updateRows(updates, 'enricher');
 
-  log.info(`Enriquecedor: ${resolved} obras resueltas por API, ${propagatedGroups} por propagación, ${unresolved} sin match, ${failures} errores → ${updated} torrents actualizados`);
-  return { scanned, groups: groups.size, lookedUp: selected.length, resolved, propagatedGroups, unresolved, failures, updated };
+  const throttles = [
+    ['AniList', anilist?.stats?.()],
+    ['Kitsu', kitsu?.stats?.()],
+    ['TMDB', tmdb?.stats?.()],
+  ]
+    .filter(([, s]) => s?.throttles > 0)
+    .map(([n, s]) => `${n}: ${s.throttles}×429 (tasa final ${s.rate}/${s.maxRate}${s.disabled ? ', en pausa' : ''})`);
+  if (throttles.length) log.warn(`enricher: límites de tasa alcanzados → ${throttles.join(' · ')}`);
+
+  log.info(`Enriquecedor: ${resolved} obras resueltas por API, ${propagatedGroups} por propagación, ${unresolved} sin match, ${failures} errores (${rateLimited} por rate limit) → ${updated} torrents actualizados`);
+  return { scanned, groups: groups.size, lookedUp: selected.length, resolved, propagatedGroups, unresolved, failures, rateLimited, updated };
 }

@@ -69,6 +69,29 @@ npm run doctor            # muestra qué variables ve el proceso y valida la key
 `npm run doctor` no escribe en la base de datos. Si la key es válida verás
 `TMDB: credencial válida`; si no, te dirá si es 401 (key rechazada), error de red o vacía.
 
+### Rate limits (errores 429 de AniList / Kitsu / TMDB)
+
+AniList es el más estricto: permite ~30 peticiones/minuto y responde `429` con
+`Retry-After: 60` en cuanto te pasas. Desde GitHub Actions las IPs de los runners
+están muy usadas, así que es fácil acabarse el presupuesto sin hacer nada raro.
+El cliente ya se defiende solo:
+
+- **Ventana deslizante**: como máximo `ANILIST_RPM` peticiones por minuto, serializadas
+  entre todos los workers (no se acumulan ráfagas aunque haya concurrencia).
+- **Penalty box**: cada `429` congela *todas* las peticiones de esa API durante el
+  `Retry-After` (o un backoff exponencial creciente) y baja la tasa a la mitad.
+- **Recuperación**: si pasa una ventana completa sin `429`, la tasa sube de nuevo
+  poco a poco (+25%) hasta el máximo configurado.
+- **Interruptor**: con varios `429` seguidos, la API se apaga 10 minutos y falla rápido
+  en lugar de reintentar sin parar (reintentar sólo empeora el bloqueo). Las obras
+  afectadas quedan para la próxima ejecución.
+- **Sin caché de errores**: una petición fallida no se cachea, así que no envenena
+  las siguientes búsquedas del mismo título.
+
+Ajustes si ves muchos `429` en el log: baja `ANILIST_RPM` (p. ej. `12`) y
+`ENRICH_MAX_LOOKUPS` (p. ej. `150`) para que la ejecución quepa en el tiempo.
+Al final del paso `enrich` verás un resumen: `límites de tasa alcanzados → AniList: 34×429 (tasa final 5/20)`.
+
 ### 3. Workflow
 
 `.github/workflows/torrents-maintenance.yml` se ejecuta a diario (04:15 UTC) y bajo demanda.

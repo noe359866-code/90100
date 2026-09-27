@@ -39,8 +39,9 @@ const parseRetryAfter = (headerValue) => {
  * @param {number} [options.timeoutMs]
  * @param {number} [options.retries]
  * @param {(err: Error, attempt: number, waitMs: number) => void} [options.onRetry]
+ * @param {(err: HttpError) => void} [options.onThrottle] se llama en cada 429/503, antes de reintentar
  */
-export async function fetchJson(url, { method = 'GET', headers = {}, body, timeoutMs = 15000, retries = 3, onRetry } = {}) {
+export async function fetchJson(url, { method = 'GET', headers = {}, body, timeoutMs = 15000, retries = 3, onRetry, onThrottle } = {}) {
   return withRetry(
     async () => {
       const controller = new AbortController();
@@ -64,12 +65,15 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
         }
 
         if (!res.ok) {
-          throw new HttpError(`HTTP ${res.status} ${res.statusText} → ${url}`, {
+          const err = new HttpError(`HTTP ${res.status} ${res.statusText} → ${url}`, {
             status: res.status,
             url,
             body: json ?? text?.slice(0, 300),
             retryAfterMs: parseRetryAfter(res.headers.get('retry-after')),
           });
+          // Avisamos al limitador de tasa para que congela el cliente y baje el ritmo
+          if ((res.status === 429 || res.status === 503) && onThrottle) onThrottle(err);
+          throw err;
         }
         return json;
       } finally {

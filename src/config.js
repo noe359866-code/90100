@@ -115,9 +115,13 @@ export const config = Object.freeze({
     /** Buscar también anime en TMDB (para obtener tmdb_id/imdb_id útiles en Stremio). */
     tmdbForAnime: toBool(env.ENRICH_TMDB_FOR_ANIME, true),
     concurrency: Math.max(toInt(env.ENRICH_CONCURRENCY, 4), 1),
-    anilistPerMinute: toInt(env.ANILIST_RPM, 28), // AniList opera degradado a 30 req/min
-    kitsuPerMinute: toInt(env.KITSU_RPM, 90),
-    tmdbPerSecond: toInt(env.TMDB_RPS, 20),
+    anilistPerMinute: Math.max(toInt(env.ANILIST_RPM, 20), 1), // AniList: 30 req/min reales; 20 deja margen
+    /** Tasa mínima a la que se degrada AniList cuando devuelve 429 (penalty box). */
+    anilistMinPerMinute: Math.max(toInt(env.ANILIST_MIN_RPM, 5), 1),
+    kitsuPerMinute: Math.max(toInt(env.KITSU_RPM, 90), 1),
+    /** Tasa mínima a la que se degrada Kitsu cuando devuelve 429. */
+    kitsuMinPerMinute: Math.max(toInt(env.KITSU_MIN_RPM, 15), 1),
+    tmdbPerSecond: Math.max(toInt(env.TMDB_RPS, 20), 1),
   },
 
   // --- Paso 7: deduplicación ----------------------------------------------
