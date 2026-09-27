@@ -2,7 +2,8 @@
  * Cliente Kitsu (JSON:API pública, sin API key).
  *
  * Prioriza la resolución exacta vía "mappings" (anilist → kitsu, mal → kitsu)
- * y sólo recurre a la búsqueda por texto si no hay IDs externos.
+ * y sólo recurre a la búsqueda por texto si no hay IDs externos. La dirección
+ * inversa (kitsu → anilist/mal) sirve de fallback cuando AniList está saturado.
  */
 import { fetchJson } from '../utils/http.js';
 import { createRateLimiter } from '../utils/async.js';
@@ -39,6 +40,7 @@ export function createKitsuClient({
         timeoutMs: 15000,
         retries: 3,
         onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
+        minWaitMs: () => limiter.stats().cooldownMs,
         onRetry: (err, attempt, wait) => log?.warn(`Kitsu: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
       }),
     ).then(
@@ -79,6 +81,34 @@ export function createKitsuClient({
   const byAniListId = (id) => byExternalId('anilist/anime', id);
   const byMalId = (id) => byExternalId('myanimelist/anime', id);
 
+  /**
+   * IDs externos de una entrada de Kitsu (su relación `mappings`: anilist/anime,
+   * myanimelist/anime...). Es el fallback para rescatar anilist_id/mal_id cuando
+   * AniList no puede responder (429 / penalty box) o no encuentra la obra.
+   * @returns {Promise<{ anilist_id:number|null, mal_id:number|null }>}
+   */
+  async function externalIds(kitsuId) {
+    const empty = { anilist_id: null, mal_id: null };
+    if (!kitsuId) return empty;
+    const url = `${BASE}/anime/${encodeURIComponent(kitsuId)}/mappings?page[limit]=20`;
+    try {
+      const json = await get(url);
+      const out = { ...empty };
+      for (const mapping of json?.data || []) {
+        const site = String(mapping?.attributes?.externalSite || '');
+        const externalId = Number.parseInt(mapping?.attributes?.externalId, 10);
+        if (!Number.isFinite(externalId)) continue;
+        if (site === 'anilist/anime') out.anilist_id ??= externalId;
+        if (site === 'myanimelist/anime') out.mal_id ??= externalId;
+      }
+      return out;
+    } catch (err) {
+      if (err?.code === 'ERR_RATE_LIMITED') throw err;
+      log?.warn(`Kitsu: fallo obteniendo mappings de anime/${kitsuId}: ${err.message}`);
+      return empty;
+    }
+  }
+
   /** Búsqueda por texto con verificación de similitud. */
   async function findBest(variants, { year = null, minSimilarity = 0.6 } = {}) {
     for (const variant of variants) {
@@ -109,5 +139,5 @@ export function createKitsuClient({
     return null;
   }
 
-  return { byAniListId, byMalId, findBest, stats: () => limiter.stats() };
+  return { byAniListId, byMalId, externalIds, findBest, stats: () => limiter.stats() };
 }

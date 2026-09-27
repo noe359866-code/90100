@@ -4,8 +4,62 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRateLimiter } from '../src/utils/async.js';
+import { createRateLimiter, withRetry } from '../src/utils/async.js';
+import { fetchJson } from '../src/utils/http.js';
 import { createAniListClient } from '../src/apis/anilist.js';
+
+test('fetchJson: un 429/503 agotado se marca como ERR_RATE_LIMITED', async () => {
+  const stub = async () => ({
+    ok: false,
+    status: 429,
+    statusText: 'Too Many Requests',
+    headers: { get: () => null },
+    text: async () => '{}',
+  });
+  await assert.rejects(
+    () => withFetch(stub, () => fetchJson('https://example.com/api', { retries: 0 })),
+    (err) => err.code === 'ERR_RATE_LIMITED' && err.status === 429,
+    'el llamador debe poder distinguirlo de un error normal (sin quemar ids_attempts)',
+  );
+});
+
+test('withRetry: minWaitMs fija la espera mínima entre reintentos', async () => {
+  const t0 = Date.now();
+  let calls = 0;
+  const result = await withRetry(
+    async () => {
+      calls += 1;
+      if (calls < 2) throw new Error('transitorio');
+      return 'ok';
+    },
+    { retries: 2, baseMs: 1, shouldRetry: () => true, minWaitMs: 150 },
+  );
+  assert.equal(result, 'ok');
+  assert.equal(calls, 2);
+  assert.ok(Date.now() - t0 >= 150, `el reintento debe esperar al menos minWaitMs (tardó ${Date.now() - t0}ms)`);
+});
+
+test('withRetry: minWaitMs acepta una función (cooldown evaluado en el momento)', async () => {
+  let cooldown = 120;
+  const t0 = Date.now();
+  await withRetry(
+    async () => {
+      if (cooldown > 0) throw new Error('transitorio');
+      return 'ok';
+    },
+    {
+      retries: 3,
+      baseMs: 1,
+      shouldRetry: () => true,
+      minWaitMs: () => {
+        const ms = cooldown;
+        cooldown = 0; // el penalty box expira durante la espera
+        return ms;
+      },
+    },
+  );
+  assert.ok(Date.now() - t0 >= 120, `debe respetar el cooldown del penalty box (tardó ${Date.now() - t0}ms)`);
+});
 
 test('rateLimiter: respeta el máximo por ventana', async () => {
   const limiter = createRateLimiter({ maxRequests: 2, perMs: 300 });

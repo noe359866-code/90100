@@ -155,7 +155,7 @@ export const config = Object.freeze({
   enrich: {
     tmdbApiKey: clean(env.TMDB_API_KEY),
     /** Máximo de obras distintas a resolver por ejecución (controla tiempo/rate-limits). */
-    maxLookups: toInt(env.ENRICH_MAX_LOOKUPS, 300),
+    maxLookups: Math.max(toInt(env.ENRICH_MAX_LOOKUPS, 300), 0),
     /** Similitud mínima título↔resultado para aceptar un match (0-1). */
     minSimilarity: clamp(toFloat(env.ENRICH_MIN_SIMILARITY, 0.6), 0, 1),
     /** Buscar también anime en TMDB (para obtener tmdb_id/imdb_id útiles en Stremio). */

@@ -236,6 +236,12 @@ const CODE_REGEX = RULES.map((rule) => ({
     : null,
 }));
 
+// Versiones GLOBALES precompiladas: la detección corre sobre cada título de la
+// tabla y recompilar docenas de RegExp por llamada era el cuello de botella.
+// OJO: al ser compartidas hay que resetear `lastIndex` antes de cada uso.
+const WORDS_G = RULES.map((rule) => new RegExp(rule.words.source, rule.words.flags.includes('g') ? rule.words.flags : `${rule.words.flags}g`));
+const CODES_G = CODE_REGEX.map((c) => (c.re ? new RegExp(c.re.source, 'g') : null));
+
 export const CANONICAL_LANGUAGES = RULES.map((r) => r.lang);
 
 /** Grupo "spanish" de la deduplicación: castellano + latino. */
@@ -257,17 +263,16 @@ export function detectLanguagesInText(text, { allowCodes = true } = {}) {
   // texto de trabajo) para que una regla más específica evaluada antes ("SPA-LA",
   // "Español Latino") no dispare también la genérica ("SPA", "Español").
   let work = String(text);
-  const consume = (re) => {
-    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  const consume = (g) => {
+    g.lastIndex = 0; // regex compartida: siempre desde el principio
     if (!g.test(work)) return false;
     work = work.replace(g, (m) => ' '.repeat(m.length));
     return true;
   };
   for (let i = 0; i < RULES.length; i += 1) {
-    const rule = RULES[i];
-    let hit = consume(rule.words);
-    if (allowCodes && CODE_REGEX[i].re) hit = consume(CODE_REGEX[i].re) || hit;
-    if (hit) found.add(rule.lang);
+    let hit = consume(WORDS_G[i]);
+    if (allowCodes && CODES_G[i]) hit = consume(CODES_G[i]) || hit;
+    if (hit) found.add(RULES[i].lang);
   }
   return uniqueSorted([...found]);
 }
@@ -367,7 +372,9 @@ const SCENE_CODE_RE = /(?:^|[.[\]_{}()-])(spa-la|spa-lat|es-la|es-mx|es-419|spa-
 
 function addSceneCodes(text, bucket) {
   if (!text) return;
-  for (const m of text.matchAll(new RegExp(SCENE_CODE_RE.source, 'gi'))) {
+  // matchAll clona la regex empezando en su lastIndex: se resetea por seguridad.
+  SCENE_CODE_RE.lastIndex = 0;
+  for (const m of text.matchAll(SCENE_CODE_RE)) {
     const lang = SCENE_LANG[m[1].toLowerCase()];
     if (lang) bucket.add(lang);
   }

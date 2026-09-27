@@ -64,6 +64,7 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
         timeoutMs: 15000,
         retries: 3,
         onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
+        minWaitMs: () => limiter.stats().cooldownMs,
         onRetry: (err, attempt, wait) => log?.warn(`TMDB: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
       }),
     ).then(
