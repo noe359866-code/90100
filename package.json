@@ -12,6 +12,7 @@
     "start": "node src/index.js",
     "dry-run": "DRY_RUN=true node src/index.js",
     "parse": "node scripts/parse-title.js",
+    "doctor": "node scripts/doctor.js",
     "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {

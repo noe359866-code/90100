@@ -24,6 +24,12 @@ const toFloat = (value, fallback) => {
 
 const MB = 1024 * 1024;
 
+/**
+ * Normaliza un valor de entorno: los secrets se pegan a menudo con espacios o
+ * un salto de línea final, y eso rompe URLs y API keys sin ningún error obvio.
+ */
+const clean = (value) => String(value ?? '').trim();
+
 /** Orden canónico de ejecución de los pasos. */
 export const ALL_STEPS = [
   'adult',
@@ -47,8 +53,8 @@ const parseSteps = (raw) => {
 
 export const config = Object.freeze({
   // --- Supabase -----------------------------------------------------------
-  supabaseUrl: env.SUPABASE_URL || '',
-  supabaseKey: env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY || '',
+  supabaseUrl: clean(env.SUPABASE_URL),
+  supabaseKey: clean(env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY),
   table: env.TABLE_NAME || 'torrents',
   /** Columna donde se guarda el título limpio generado por el parser. */
   cleanTitleColumn: env.CLEAN_TITLE_COLUMN || 'title_text',
@@ -101,7 +107,7 @@ export const config = Object.freeze({
 
   // --- Paso 6: enriquecimiento --------------------------------------------
   enrich: {
-    tmdbApiKey: env.TMDB_API_KEY || '',
+    tmdbApiKey: clean(env.TMDB_API_KEY),
     /** Máximo de obras distintas a resolver por ejecución (controla tiempo/rate-limits). */
     maxLookups: toInt(env.ENRICH_MAX_LOOKUPS, 300),
     /** Similitud mínima título↔resultado para aceptar un match (0-1). */

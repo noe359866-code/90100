@@ -42,6 +42,33 @@ Sólo se escriben en la BD las filas que realmente cambian. `DRY_RUN=true` ejecu
 Los parámetros no sensibles pueden definirse como **Repository variables** (`vars.*`) o pasarse
 como inputs al lanzar el workflow manualmente (`workflow_dispatch`: `dry_run`, `steps`, `log_level`, `enrich_max_lookups`).
 
+#### "Puse la TMDB_API_KEY y sigue apareciendo el aviso"
+
+Es el fallo más habitual y casi nunca es del código. El workflow sólo lee
+`secrets.TMDB_API_KEY` (con `vars.TMDB_API_KEY` como alternativa), así que revisa en este orden:
+
+1. **Nombre exacto**: `TMDB_API_KEY`, en mayúsculas. `TMDB_KEY` o `tmdb_api_key` llegan vacíos.
+2. **Pestaña correcta**: Settings → Secrets and variables → Actions → **Secrets**.
+   Si la guardaste en la pestaña **Variables** ahora también funciona (`vars.*`), pero si la
+   guardaste dentro de un **Environment** (Settings → Environments → *tu entorno* → Secrets),
+   el job **no** la recibe salvo que el workflow declare `environment: <nombre>`.
+3. **Relanza el workflow**: los secrets se inyectan al iniciar el job; editar el secret no
+   afecta a una ejecución ya en marcha.
+4. **Espacios o saltos de línea al copiar**: el script los recorta, pero una key truncada da 401.
+5. **Tipo de credencial**: valen la API key v3 (32 chars) y el token de lectura v4 (JWT largo);
+   el script detecta cuál es y la usa en el formato correcto.
+
+Para comprobarlo sin esperar al workflow, en local:
+
+```bash
+cp .env.example .env      # pega aquí la MISMA key
+npm ci
+npm run doctor            # muestra qué variables ve el proceso y valida la key contra TMDB
+```
+
+`npm run doctor` no escribe en la base de datos. Si la key es válida verás
+`TMDB: credencial válida`; si no, te dirá si es 401 (key rechazada), error de red o vacía.
+
 ### 3. Workflow
 
 `.github/workflows/torrents-maintenance.yml` se ejecuta a diario (04:15 UTC) y bajo demanda.

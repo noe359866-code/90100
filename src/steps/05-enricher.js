@@ -129,7 +129,10 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
 export async function runEnricher(db, config, log, deps = {}) {
   const hasTmdb = Boolean(config.enrich.tmdbApiKey) || Boolean(deps.tmdb);
   const tmdbForAnime = config.enrich.tmdbForAnime;
-  if (!hasTmdb) log.warn('TMDB_API_KEY no configurada: sólo se enriquecerán animes (AniList/Kitsu).');
+  if (!hasTmdb) {
+    log.warn('TMDB_API_KEY no configurada: sólo se enriquecerán animes (AniList/Kitsu).');
+    log.warn('Si la definiste en GitHub: revisa que el secret se llame exactamente TMDB_API_KEY, esté en la pestaña Secrets (no en Variables ni en un Environment sin declarar en el job) y relanza el workflow.');
+  }
 
   const anilist = deps.anilist || createAniListClient({ requestsPerMinute: config.enrich.anilistPerMinute, log });
   const kitsu = deps.kitsu || createKitsuClient({ requestsPerMinute: config.enrich.kitsuPerMinute, log });

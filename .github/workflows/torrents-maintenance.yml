@@ -56,10 +56,13 @@ jobs:
 
       - name: Ejecutar mantenimiento
         env:
-          # --- Secrets (Settings → Secrets and variables → Actions) ---
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          # --- Secrets (Settings → Secrets and variables → Actions → pestaña "Secrets") ---
+          # OJO: si guardas la credencial en un "Environment" (Settings → Environments),
+          # el job debe declarar `environment: <nombre>` para recibirla; si no, llega vacía.
+          # El `|| vars.` permite haberla guardado como Variable sin romper el flujo.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL || '' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_ROLE_KEY || '' }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY || vars.TMDB_API_KEY || '' }}
 
           # --- Parámetros de ejecución ---
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || vars.DRY_RUN || 'false' }}
