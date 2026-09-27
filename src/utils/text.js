@@ -65,6 +65,46 @@ export function titleSimilarity(a, b) {
   return Math.min(1, score);
 }
 
+/** "2nd Season", "Season 2", "Temporada 3"... */
+export function hasSeasonMarker(text) {
+  return /(?:\b(?:season|temporada|saison|staffel)\b|\d(?:st|nd|rd|th)\s+season)/i.test(String(text || ''));
+}
+
+/**
+ * Ajusta una similitud base con señales que el coeficiente solo no ve:
+ *  - prefijo de palabra largo ("Frieren" ⊂ "Frieren Beyond Journey's End")
+ *  - la consulta pide una temporada y el candidato no la menciona
+ *  - el año coincide o se aleja
+ *
+ * `yearWindow` / `yearPenalty` / `yearBonus` permiten el criterio de cada API.
+ */
+export function adjustTitleScore(baseScore, query, titles, {
+  year = null,
+  itemYear = null,
+  yearWindow = 3,
+  yearPenalty = 0.15,
+  yearBonus = 0.1,
+} = {}) {
+  let score = baseScore;
+  const list = (Array.isArray(titles) ? titles : [titles]).filter(Boolean);
+  const q = normalizeKey(query);
+  if (q.length >= 7) {
+    for (const t of list) {
+      const kt = normalizeKey(t);
+      if (kt && kt !== q && (kt.startsWith(`${q} `) || q.startsWith(`${kt} `))) score = Math.max(score, 0.78);
+    }
+  }
+  if (hasSeasonMarker(query) && !list.some((t) => hasSeasonMarker(t))) score -= 0.22;
+  if (year && itemYear) {
+    const diff = Math.abs(Number(itemYear) - Number(year));
+    if (Number.isFinite(diff)) {
+      if (diff <= 1) score += yearBonus;
+      else if (diff > yearWindow) score -= yearPenalty;
+    }
+  }
+  return score;
+}
+
 /** Devuelve el candidato con mayor similitud respecto a cualquiera de los títulos dados. */
 export function bestSimilarity(query, candidateTitles) {
   let best = 0;

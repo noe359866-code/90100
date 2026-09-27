@@ -6,7 +6,7 @@
  */
 import { fetchJson } from '../utils/http.js';
 import { createRateLimiter } from '../utils/async.js';
-import { bestSimilarity } from '../utils/text.js';
+import { adjustTitleScore, bestSimilarity } from '../utils/text.js';
 
 const BASE = 'https://kitsu.io/api/edge';
 const HEADERS = { Accept: 'application/vnd.api+json', 'Content-Type': 'application/vnd.api+json' };
@@ -70,6 +70,7 @@ export function createKitsuClient({
       const included = json?.included?.find((i) => i.type === 'anime');
       return included ? Number(included.id) : null;
     } catch (err) {
+      if (err?.code === 'ERR_RATE_LIMITED') throw err;
       log?.warn(`Kitsu: fallo en mapping ${site}=${externalId}: ${err.message}`);
       return null;
     }
@@ -86,6 +87,7 @@ export function createKitsuClient({
       try {
         json = await get(url);
       } catch (err) {
+        if (err?.code === 'ERR_RATE_LIMITED') throw err;
         log?.warn(`Kitsu: fallo buscando "${variant}": ${err.message}`);
         continue;
       }
@@ -94,12 +96,10 @@ export function createKitsuClient({
         const a = item.attributes || {};
         if (a.subtype === 'music') continue;
         const titles = [a.canonicalTitle, ...Object.values(a.titles || {}), ...(a.abbreviatedTitles || [])];
-        let score = bestSimilarity(variant, titles);
         const itemYear = a.startDate ? Number(a.startDate.slice(0, 4)) : null;
-        if (year && itemYear) {
-          if (Math.abs(itemYear - year) <= 1) score += 0.1;
-          else if (Math.abs(itemYear - year) > 3) score -= 0.15;
-        }
+        const score = adjustTitleScore(bestSimilarity(variant, titles), variant, titles, {
+          year, itemYear, yearWindow: 3, yearPenalty: 0.15, yearBonus: 0.1,
+        });
         if (!best || score > best.score) best = { item, score, title: a.canonicalTitle, year: itemYear };
       }
       if (best && best.score >= minSimilarity) {

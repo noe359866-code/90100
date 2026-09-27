@@ -47,7 +47,10 @@ test('detectTitleLanguages: VOSE y dual', () => {
 
 test('detectTitleLanguages: no confunde palabras en minúsculas con códigos', () => {
   assert.deepEqual(detectTitleLanguages('the cast of the show').audio, []);
+  assert.deepEqual(detectTitleLanguages('the spa of the day').audio, []);
   assert.deepEqual(detectTitleLanguages('[CAST]').audio, ['spanish']);
+  assert.deepEqual(detectTitleLanguages('1080p.BluRay.spa').audio, ['spanish']);
+  assert.deepEqual(detectTitleLanguages('1080p WEB vose').subtitles, ['spanish']);
 });
 
 test('classifyLanguage', () => {

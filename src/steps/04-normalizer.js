@@ -31,6 +31,17 @@ export const fitToColumn = (column, value) => {
   return value.slice(0, limit);
 };
 
+/**
+ * `HD`/`SD` en la columna son alias vagos: si el título trae 1080p/720p/…, manda el título.
+ * Una resolución explícita ya guardada (`1080p`, `4K`) no se pisa.
+ */
+function pickQuality(rowQuality, parsedQuality) {
+  const fromRow = normalizeQuality(rowQuality);
+  const vague = /^(?:hd|sd)$/i.test(String(rowQuality ?? '').trim());
+  if (vague && parsedQuality) return parsedQuality;
+  return fromRow || parsedQuality || null;
+}
+
 const toIntOrNull = (v) => {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -87,7 +98,7 @@ export function buildNormalizationPatch(row, config) {
   // --- Codec / calidad ---
   const codec = normalizeCodec(row.codec) || parsed.codec || null;
   if (codec && codec !== row.codec) patch.codec = fitToColumn('codec', codec);
-  const quality = normalizeQuality(row.quality) || parsed.quality || null;
+  const quality = pickQuality(row.quality, parsed.quality);
   if (quality && quality !== row.quality) patch.quality = fitToColumn('quality', quality);
 
   // --- Idiomas ---

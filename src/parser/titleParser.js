@@ -112,7 +112,8 @@ const SEASON_PATTERNS = [
 ];
 
 // --- Metadatos técnicos -----------------------------------------------------
-const RE_YEAR_GLOBAL = /(?<!\d)((?:19|20)\d{2})(?![\dp])/g;
+// `x\d` evita leer el año 1920 dentro de "1920x1080".
+const RE_YEAR_GLOBAL = /(?<!\d)((?:19|20)\d{2})(?![\dp]|x\d)/g;
 const RE_YEAR_BRACKETED = /[[(]\s*((?:19|20)\d{2})\s*[\])]/;
 
 const RE_QUALITY = /(?<![A-Za-z0-9])(2160p|1080p|1080i|720p|576p|480p|360p|4K|UHD|FHD|3840x2160|1920x1080|1280x720)(?![A-Za-z0-9])/i;
@@ -135,12 +136,12 @@ const RE_AUDIO_CODEC = /(?<![A-Za-z0-9])(?:(DDP|DD\+|E-?AC-?3)|(AC-?3|DD)|(AAC)|
 const AUDIO_CODEC_NAMES = ['eac3', 'ac3', 'aac', 'dts', 'truehd', 'atmos', 'flac', 'opus', 'mp3', 'pcm'];
 const RE_CHANNELS = /(?<![A-Za-z0-9.])(2\.0|5\.1|7\.1)(?![A-Za-z0-9])/;
 
-const RE_HDR = /(?<![A-Za-z0-9])(HDR10\+|HDR10Plus|HDR10|HDR|DV|DoVi|Dolby[ .]?Vision|HLG|SDR)(?![A-Za-z0-9])/;
+const RE_HDR = /(?<![A-Za-z0-9])(HDR10\+|HDR10Plus|HDR10|HDR|DV|DoVi|Dolby[ .]?Vision|HLG|SDR)(?![A-Za-z0-9])/i;
 const RE_BIT_DEPTH = /(?<![A-Za-z0-9])(?:(10|8)[ -]?bits?|Hi10P?)(?![A-Za-z0-9])/i;
 
 const RE_COMPLETE = /(?<![A-Za-z0-9])(COMPLETE|COMPLETA|COMPLETO|Batch|Int[eé]grale|Full[ .-]?(?:Season|Series)|Serie[ .-]Completa|Temporada[ .-]Completa|Complete[ .-]Series)(?![A-Za-z0-9])/i;
-const RE_FLAGS = /(?<![A-Za-z0-9])(REPACK|PROPER|RERIP|iNTERNAL|INTERNAL|LIMITED|EXTENDED|UNRATED|Directors?[ .]Cut|Theatrical|IMAX|REMASTERED|Uncut|UNCENSORED|Censored|HC|HardSub(?:bed)?|SoftSub(?:bed)?|Dubbed|Subbed)(?![A-Za-z0-9])/i;
-const RE_ANIME_EXTRA = /(?<![A-Za-z0-9])(OVA|ONA|OAD|NCOP|NCED|BDMV)(?![A-Za-z0-9])/;
+const RE_FLAGS = /(?<![A-Za-z0-9])(REPACK|PROPER|RERIP|iNTERNAL|INTERNAL|LIMITED|EXTENDED|UNRATED|Directors?(?:'s)?[ ._-]?Cut|Theatrical(?:[ ._-]?Cut)?|IMAX|REMASTERED|Uncut|UNCENSORED|Censored|HC|HardSub(?:bed)?|SoftSub(?:bed)?|Dubbed|Subbed)(?![A-Za-z0-9])/i;
+const RE_ANIME_EXTRA = /(?<![A-Za-z0-9])(OVA|ONA|OAD|NCOP|NCED|BDMV)(?![A-Za-z0-9])/i;
 const RE_DUAL_MULTI = /(?<![A-Za-z0-9])(Dual[ ._-]?(?:Audio|Áudio|Lang)?|Multi[ ._-]?(?:Audio|Lang(?:uage)?s?)?|Multi[ ._-]?Subs?|Multiple[ ._-]?Subtitles?|MultiSub|Tri[ ._-]?Audio)(?![A-Za-z0-9])/i;
 
 /** Tokens de idioma inequívocos (seguros como punto de corte del título). */
@@ -236,7 +237,7 @@ function extractYear(full, stripped) {
   }
   if (last) return last;
   // Año al inicio y nada más ("2012 1080p") → lo aceptamos como año sólo si hay otro token detrás.
-  const lead = /^((?:19|20)\d{2})(?![\dp])/.exec(stripped);
+  const lead = /^((?:19|20)\d{2})(?![\dp]|x\d)/.exec(stripped);
   if (lead && /\d{3,4}p|bluray|web|hdtv|x26[45]|hevc/i.test(stripped)) return { year: +lead[1], index: -1 };
   return null;
 }
@@ -244,6 +245,45 @@ function extractYear(full, stripped) {
 function groupIndex(m, names) {
   for (let i = 1; i < m.length; i += 1) if (m[i]) return names[i - 1];
   return null;
+}
+
+/**
+ * ¿Este match es metadato de release y no parte del título?
+ * "COMPLETE" / "EXTENDED" en mayúsculas (scene) sí; "A Complete Unknown" o
+ * "The Extended Cut" no. Las frases ("Temporada Completa", "Director's Cut") sí.
+ */
+const ALWAYS_METADATA_TAG = /^(?:repack|proper|rerip|internal|remastered|uncensored|hardsub(?:bed)?|softsub(?:bed)?|dubbed|subbed|hc|director'?s?(?:[ ._-]cut)?|theatrical(?:[ ._-]cut)?|batch|intégrale|integrale)$/i;
+const PHRASE_METADATA = /(?:temporada|serie|season|series|batch|full|intégrale|integrale)/i;
+
+function matchIsMetadataTag(text, match) {
+  const raw = match[0];
+  const word = match[1] || raw;
+  if (ALWAYS_METADATA_TAG.test(word) || ALWAYS_METADATA_TAG.test(raw)) return true;
+  if (PHRASE_METADATA.test(raw) && raw.length > 8) return true;
+  if (raw === raw.toUpperCase() && /[A-Z]/.test(raw)) return true;
+  const after = text.slice(match.index + raw.length);
+  // El separador puede ser espacio o punto scene ("Complete.1080p", "EXTENDED.1080p").
+  return /^[ ._-]*(?:\d{3,4}p\b|bluray|brrip|web-?dl|webrip|web\b|hdtv|x26[45]|hevc|h\.?26[45])/i.test(after);
+}
+
+function replaceMetadataTags(text, re) {
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
+  const g = new RegExp(re.source, flags);
+  return text.replace(g, (m, ...rest) => {
+    const index = rest[rest.length - 2];
+    const groups = rest.slice(0, -2);
+    const fake = [m, ...groups];
+    fake.index = index;
+    return matchIsMetadataTag(text, fake) ? ' ' : m;
+  });
+}
+
+/** Quita "Extended Cut" / "Director's Cut" finales sólo si queda título de verdad. */
+function stripTrailingEdition(t) {
+  const next = t.replace(/(?:\s+(?:extended|director'?s|theatrical|final|unrated)\s+cut|\s+remastered|\s+imax)+$/i, '').trim();
+  if (!next || next === t) return t;
+  if (next.length >= 8 || next.split(/\s+/).filter(Boolean).length >= 2) return next;
+  return t;
 }
 
 /** Post-procesado del título limpio. */
@@ -263,11 +303,13 @@ function polishTitle(raw) {
     .replace(new RegExp(`(?:[\\s._-]*${RE_MISC_NOISE.source}\\s*)+$`, 'i'), '');
   if (denoised.trim().length >= 2) t = denoised;
   t = t.replace(RE_LANG_TRAILING, '');
+  t = t.replace(/^(?:2160p|1080p|1080i|720p|576p|480p|360p|4k|uhd|fhd|3840x2160|1920x1080|1280x720)[ ._-]+/i, '');
   t = t.replace(/\s+/g, ' ');
   t = t.replace(/^[\s\-–—_.:,;!?)\]}]+|[\s\-–—_.:,;([{]+$/g, '');
   t = t.replace(/\s+([,;:!?])/g, '$1');
   // Un título terminado en " -" o "- " residual
   t = t.replace(/\s[-–—]\s*$/, '').trim();
+  t = stripTrailingEdition(t);
   return t;
 }
 
@@ -281,6 +323,10 @@ function fallbackTitle(stripped) {
     RE_COMPLETE, RE_FLAGS, RE_ANIME_EXTRA, RE_DUAL_MULTI, RE_LANG_CUT, RE_YEAR_GLOBAL,
   ];
   for (const re of removers) {
+    if (re === RE_COMPLETE || re === RE_FLAGS) {
+      t = replaceMetadataTags(t, re);
+      continue;
+    }
     t = t.replace(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`), ' ');
   }
   return polishTitle(t);
@@ -331,7 +377,7 @@ export function parseTitle(rawTitle) {
   if (!raw) return result;
 
   // --- 1. Preprocesado --------------------------------------------------------
-  let full = raw;
+  let full = raw.replace(/\.torrent$/i, '');
   const ext = RE_EXTENSION.exec(full);
   if (ext) {
     result.container = ext[1].toLowerCase();
@@ -370,6 +416,10 @@ export function parseTitle(rawTitle) {
 
   // --- 2. Temporada / episodio ------------------------------------------------
   const cutCandidates = []; // índices de corte en `stripped`
+  let leadingSkip = 0; // "Cap.209 Título" empieza por el marcador: se quita, no se usa como corte
+  const noteLeading = (info) => {
+    if (info && info.index === 0 && info.end > leadingSkip) leadingSkip = info.end;
+  };
 
   const se = extractSeasonEpisode(full);
   const seStripped = extractSeasonEpisode(stripped);
@@ -379,6 +429,7 @@ export function parseTitle(rawTitle) {
     result.episodeEnd = se.episodeEnd;
   }
   if (seStripped && seStripped.index > 0) cutCandidates.push(seStripped.index);
+  else noteLeading(seStripped);
 
   const seasonOnly = extractSeasonOnly(full);
   const seasonOnlyStripped = extractSeasonOnly(stripped);
@@ -387,6 +438,7 @@ export function parseTitle(rawTitle) {
     result.seasonEnd = seasonOnly.seasonEnd;
   }
   if (seasonOnlyStripped && seasonOnlyStripped.index > 0) cutCandidates.push(seasonOnlyStripped.index);
+  else noteLeading(seasonOnlyStripped);
 
   // Episodio absoluto: cuando no hay SxxEyy, o como complemento ("S04E28 - 87").
   const absFrom = se ? se.end : 0;
@@ -404,7 +456,16 @@ export function parseTitle(rawTitle) {
   const absStripped = extractAbsoluteEpisode(stripped, seStripped ? seStripped.end : 0);
   if (absStripped && absStripped.index > 0) cutCandidates.push(absStripped.index);
 
-  if (RE_COMPLETE.test(full)) {
+  const completeTag = (() => {
+    const g = new RegExp(RE_COMPLETE.source, RE_COMPLETE.flags.includes('g') ? RE_COMPLETE.flags : `${RE_COMPLETE.flags}g`);
+    let m;
+    while ((m = g.exec(full)) !== null) {
+      if (matchIsMetadataTag(full, m)) return m;
+      if (m[0].length === 0) g.lastIndex += 1;
+    }
+    return null;
+  })();
+  if (completeTag) {
     result.isComplete = true;
     result.flags.push('complete');
   }
@@ -446,23 +507,34 @@ export function parseTitle(rawTitle) {
   const bd = RE_BIT_DEPTH.exec(full);
   if (bd) result.bitDepth = bd[1] ? +bd[1] : 10;
 
-  for (const m of full.matchAll(new RegExp(RE_FLAGS.source, 'gi'))) result.flags.push(m[1].toLowerCase());
+  for (const m of full.matchAll(new RegExp(RE_FLAGS.source, 'gi'))) {
+    if (matchIsMetadataTag(full, m)) result.flags.push(m[1].toLowerCase());
+  }
   const dualMulti = RE_DUAL_MULTI.exec(full);
   if (dualMulti) result.flags.push(dualMulti[1].toLowerCase().replace(/[ ._-]/g, ''));
   result.flags = [...new Set(result.flags)];
 
   // --- 5. Título limpio -------------------------------------------------------
-  for (const re of [RE_QUALITY, RE_SOURCE, RE_SOURCE_CS, RE_CODEC, RE_AUDIO_CODEC, RE_CHANNELS, RE_HDR, RE_BIT_DEPTH, RE_COMPLETE, RE_FLAGS, RE_ANIME_EXTRA, RE_DUAL_MULTI, RE_LANG_CUT]) {
+  for (const re of [RE_QUALITY, RE_SOURCE, RE_SOURCE_CS, RE_CODEC, RE_AUDIO_CODEC, RE_CHANNELS, RE_HDR, RE_BIT_DEPTH, RE_ANIME_EXTRA, RE_DUAL_MULTI, RE_LANG_CUT]) {
     const m = firstMatch(re, stripped);
     if (m) cutCandidates.push(m.index);
   }
+  for (const re of [RE_COMPLETE, RE_FLAGS]) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let m;
+    while ((m = g.exec(stripped)) !== null) {
+      if (m.index > 0 && matchIsMetadataTag(stripped, m)) cutCandidates.push(m.index);
+      if (m[0].length === 0) g.lastIndex += 1;
+    }
+  }
 
   let titleRaw;
-  if (cutCandidates.length) {
-    titleRaw = stripped.slice(0, Math.min(...cutCandidates));
+  const cuts = cutCandidates.filter((i) => i > leadingSkip);
+  if (cuts.length) {
+    titleRaw = stripped.slice(leadingSkip, Math.min(...cuts));
   } else {
     // Sin ningún token: quitamos un posible grupo scene final ("Movie Name-GROUP") sólo si hay guion sin espacios
-    titleRaw = stripped.replace(/(?<=\S)-[A-Za-z0-9]{2,12}$/, '');
+    titleRaw = stripped.slice(leadingSkip).replace(/(?<=\S)-[A-Za-z0-9]{2,12}$/, '');
   }
 
   // Número suelto al final de la zona de título ("Naruto Shippuden 297", "Show 09") → episodio absoluto.
@@ -502,6 +574,7 @@ export function parseTitle(rawTitle) {
   if (abs && ['cjk', 'hash', 'bracket'].includes(abs.kind)) animeScore += 15;
   if (RE_JAPANESE.test(raw)) animeScore += 35;
   if (RE_ANIME_EXTRA.test(full)) animeScore += 20;
+  if (/(?:^|[^A-Za-z0-9])\d{1,4}v\d(?![A-Za-z0-9])/i.test(full)) animeScore += 25; // "01v2" es de fansub
   if (result.bitDepth === 10) animeScore += 5;
   if (result.languages.audio.includes('japanese')) animeScore += 15;
   if (/(?<![A-Za-z])(?:no|wo|ga|ni|to|wa)(?![A-Za-z])/.test(title) && /[A-Za-z]/.test(title)) animeScore += 10; // partículas romaji

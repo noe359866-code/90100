@@ -79,6 +79,7 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   const found = {};
   const sources = [];
   let confidence = null;
+  let rateLimited = false;
   const credit = (api, score = null) => {
     if (!sources.includes(api)) sources.push(api);
     if (typeof score === 'number' && Number.isFinite(score)) confidence = Math.max(confidence ?? 0, score);
@@ -88,6 +89,18 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   const minSimilarity = config.enrich.minSimilarity;
   const variants = group.variants;
   const year = group.year;
+  // Un 429 no debe tirar los IDs que ya encontramos en otra API.
+  const guard = async (fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err?.code === 'ERR_RATE_LIMITED') {
+        rateLimited = true;
+        return undefined;
+      }
+      throw err;
+    }
+  };
 
   if (group.type === 'anime') {
     // --- AniList ---
@@ -95,26 +108,28 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
     // Si AniList nos ha cerrado el grifo por rate limit, no insistimos: esa obra
     // se queda sin resolver y se reintentará en la próxima ejecución.
     const anilistBlocked = anilist?.stats?.().disabled === true;
+    if (anilistBlocked) rateLimited = true;
     if (!anilistBlocked && (need('anilist_id') || need('mal_id'))) {
-      const hit = await anilist.findBest(variants, { year, minSimilarity });
+      const hit = await guard(() => anilist.findBest(variants, { year, minSimilarity }));
       if (hit) {
         if (need('anilist_id')) found.anilist_id = hit.anilist_id;
         if (need('mal_id') && hit.mal_id) found.mal_id = hit.mal_id;
         englishTitle = hit.englishTitle;
         credit('anilist', hit.score);
         log.debug(`AniList ✓ "${group.label}" → ${hit.anilist_id} (${hit.title}, score ${hit.score.toFixed(2)})`);
-      } else {
+      } else if (!rateLimited) {
         log.debug(`AniList ✗ "${group.label}"`);
       }
     }
     // --- Kitsu ---
+    // No se salta porque AniList esté en pausa: Kitsu puede resolver igual.
     if (need('kitsu_id')) {
       const anilistId = known.anilist_id || found.anilist_id;
       const malId = known.mal_id || found.mal_id;
-      let kitsuId = anilistId ? await kitsu.byAniListId(anilistId) : null;
-      if (!kitsuId && malId) kitsuId = await kitsu.byMalId(malId);
+      let kitsuId = anilistId ? await guard(() => kitsu.byAniListId(anilistId)) : null;
+      if (!kitsuId && malId) kitsuId = await guard(() => kitsu.byMalId(malId));
       if (!kitsuId) {
-        const hit = await kitsu.findBest(englishTitle ? [...variants, englishTitle] : variants, { year, minSimilarity });
+        const hit = await guard(() => kitsu.findBest(englishTitle ? [...variants, englishTitle] : variants, { year, minSimilarity }));
         kitsuId = hit?.kitsu_id ?? null;
       }
       if (kitsuId) {
@@ -127,22 +142,29 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
     if (tmdb && (need('tmdb_id') || need('imdb_id'))) {
       let tmdbId = known.tmdb_id || found.tmdb_id || null;
       let kind = 'tv';
+      let kindKnown = false;
       if (!tmdbId) {
         const tmdbVariants = englishTitle ? [englishTitle, ...variants] : variants;
-        let hit = await tmdb.findBest('tv', tmdbVariants, { year, minSimilarity });
+        let hit = await guard(() => tmdb.findBest('tv', tmdbVariants, { year, minSimilarity }));
         if (!hit && !group.hasEpisode) {
-          hit = await tmdb.findBest('movie', tmdbVariants, { year, minSimilarity });
+          hit = await guard(() => tmdb.findBest('movie', tmdbVariants, { year, minSimilarity }));
         }
         if (hit) {
           tmdbId = hit.tmdb_id;
           kind = hit.kind;
+          kindKnown = true;
           credit('tmdb', hit.score);
           if (need('tmdb_id')) found.tmdb_id = tmdbId;
         }
       }
       if (tmdbId && need('imdb_id')) {
-        const ext = await tmdb.externalIds(kind, tmdbId);
-        const extImdb = cleanImdbId(ext.imdb_id);
+        let ext = await guard(() => tmdb.externalIds(kind, tmdbId));
+        // Un tmdb_id ya guardado no dice si es movie o tv. Sólo entonces se prueba el otro tipo.
+        if (!kindKnown && !cleanImdbId(ext?.imdb_id) && kind === 'tv') {
+          const movieExt = await guard(() => tmdb.externalIds('movie', tmdbId));
+          if (cleanImdbId(movieExt?.imdb_id)) ext = movieExt;
+        }
+        const extImdb = cleanImdbId(ext?.imdb_id);
         if (extImdb) found.imdb_id = extImdb;
       }
     }
@@ -150,23 +172,23 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
     const kind = group.type === 'movie' ? 'movie' : 'tv';
     let tmdbId = known.tmdb_id || null;
     if (!tmdbId && need('tmdb_id')) {
-      const hit = await tmdb.findBest(kind, variants, { year, minSimilarity });
+      const hit = await guard(() => tmdb.findBest(kind, variants, { year, minSimilarity }));
       if (hit) {
         tmdbId = hit.tmdb_id;
         found.tmdb_id = tmdbId;
         credit('tmdb', hit.score);
         log.debug(`TMDB ✓ "${group.label}" → ${kind}/${tmdbId} (${hit.title} ${hit.year ?? ''}, score ${hit.score.toFixed(2)})`);
-      } else {
+      } else if (!rateLimited) {
         log.debug(`TMDB ✗ "${group.label}"`);
       }
     }
     if (tmdbId && need('imdb_id')) {
-      const ext = await tmdb.externalIds(kind, tmdbId);
-      const extImdb = cleanImdbId(ext.imdb_id);
+      const ext = await guard(() => tmdb.externalIds(kind, tmdbId));
+      const extImdb = cleanImdbId(ext?.imdb_id);
       if (extImdb) found.imdb_id = extImdb;
     }
   }
-  return { ids: found, source: sources.join('+'), confidence };
+  return { ids: found, source: sources.join('+'), confidence, rateLimited };
 }
 
 /**
@@ -239,22 +261,28 @@ export async function runEnricher(db, config, log, deps = {}) {
     for await (const page of db.iterateRows({ select, applyFilters: query.filters })) {
       for (const row of page) {
         scanned += 1;
-        const parsed = parseTitle(row.title);
+        let parsed = parseTitle(row.title);
+        if (!parsed.cleanTitle && row[cleanCol]) {
+          const alt = parseTitle(String(row[cleanCol]));
+          if (alt.cleanTitle) parsed = { ...parsed, cleanTitle: alt.cleanTitle, searchKey: alt.searchKey, year: parsed.year ?? alt.year };
+        }
         const type = row.type || parsed.type;
         const needed = missingIdsFor(type, row, { hasTmdb, tmdbForAnime });
         if (!needed.size || !parsed.cleanTitle) continue;
 
-        const season = type === 'anime' && parsed.season && parsed.season > 1 ? parsed.season : '';
-        const key = `${type}|${parsed.searchKey}|${parsed.year ?? ''}|${season}`;
+        const seasonKey = type === 'anime' && parsed.season && parsed.season > 1 ? String(parsed.season) : '';
+        const key = `${type}|${parsed.searchKey}|${parsed.year ?? ''}|${seasonKey}`;
         let g = groups.get(key);
         if (!g) {
           g = {
             key,
             type,
-            label: parsed.cleanTitle + (parsed.year ? ` (${parsed.year})` : '') + (season ? ` S${season}` : ''),
+            searchKey: parsed.searchKey,
+            seasonKey,
+            label: parsed.cleanTitle + (parsed.year ? ` (${parsed.year})` : '') + (seasonKey ? ` S${seasonKey}` : ''),
             variants: buildSearchVariants(parsed),
             year: parsed.year,
-            hasEpisode: parsed.episode !== null || parsed.season !== null,
+            hasEpisode: parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null,
             known: {},
             needed: new Set(),
             rows: [],
@@ -265,10 +293,45 @@ export async function runEnricher(db, config, log, deps = {}) {
         if (trackIds) g.attempts = Math.max(g.attempts ?? 0, Number(row.ids_attempts) || 0);
         for (const f of needed) g.needed.add(f);
         for (const f of ID_FIELDS) if (!isMissing(row[f]) && isMissing(g.known[f])) g.known[f] = row[f];
-        if (parsed.episode !== null || parsed.season !== null) g.hasEpisode = true;
+        if (parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null) g.hasEpisode = true;
       }
     }
   }
+
+  // "Dune Part Two (2024)" y "Dune Part Two 1080p" son la misma obra. Años
+  // distintos (remakes) no se mezclan; un año ausente se une al único año conocido.
+  const merged = new Map();
+  const buckets = new Map();
+  for (const g of groups.values()) {
+    const bkey = `${g.type}|${g.searchKey}|${g.seasonKey}`;
+    if (!buckets.has(bkey)) buckets.set(bkey, []);
+    buckets.get(bkey).push(g);
+  }
+  for (const list of buckets.values()) {
+    const years = [...new Set(list.map((g) => g.year).filter((y) => y != null))];
+    if (years.length > 1) {
+      for (const g of list) {
+        // "Dune" sin año, con remakes de 1984 y 2021, no se consulta: el match sería una moneda al aire.
+        if (g.year == null) g.ambiguousYear = true;
+        merged.set(g.key, g);
+      }
+      continue;
+    }
+    const base = list.find((g) => g.year != null) || list[0];
+    for (const g of list) {
+      if (g === base) continue;
+      base.rows.push(...g.rows);
+      base.variants = [...new Set([...base.variants, ...g.variants])];
+      for (const f of g.needed) base.needed.add(f);
+      for (const [f, v] of Object.entries(g.known)) if (isMissing(base.known[f])) base.known[f] = v;
+      if (g.hasEpisode) base.hasEpisode = true;
+      base.attempts = Math.max(base.attempts ?? 0, g.attempts ?? 0);
+    }
+    if (years.length === 1) base.year = years[0];
+    merged.set(base.key, base);
+  }
+  groups.clear();
+  for (const [k, g] of merged) groups.set(k, g);
 
   log.info(`enricher: ${scanned} torrents huérfanos en ${groups.size} obras distintas`);
 
@@ -291,6 +354,12 @@ export async function runEnricher(db, config, log, deps = {}) {
     if (!stillNeeded.length) {
       applyToRows(g, g.known); // todo resoluble con lo que ya sabemos
       propagatedGroups += 1;
+    } else if (g.ambiguousYear) {
+      // Hay varios remakes: no se pregunta a la API, pero sí se copian los IDs que ya hay en el grupo.
+      if (Object.values(g.known).some((v) => !isMissing(v))) {
+        applyToRows(g, g.known);
+        propagatedGroups += 1;
+      }
     } else {
       g.needed = new Set(stillNeeded);
       toLookup.push(g);
@@ -317,27 +386,30 @@ export async function runEnricher(db, config, log, deps = {}) {
   let failures = 0;
   let rateLimited = 0;
   let rateLimitWarned = false;
+  const warnRate = () => {
+    if (rateLimitWarned) return;
+    rateLimitWarned = true;
+    log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
+  };
   await mapWithConcurrency(selected, config.enrich.concurrency, async (g) => {
-    // ¿Alguna API está en pausa por rate limit? Entonces muchas obras se quedarán
-    // sin resolver sin que sea un fallo del script.
-    const blocked = [anilist, kitsu, tmdb].some((c) => c?.stats?.().disabled);
     try {
-      const { ids: found, source, confidence } = await resolveWork(g, { anilist, kitsu, tmdb, config, log });
+      const { ids: found, source, confidence, rateLimited: limited } = await resolveWork(g, { anilist, kitsu, tmdb, config, log });
       const ids = { ...g.known, ...found };
-      // Telemetría sólo si la tabla tiene las columnas (y no en DRY_RUN, donde no se escribe nada)
-      if (trackIds && !config.dryRun) {
+      const got = Object.keys(found).length > 0;
+      const stillMissing = [...g.needed].some((f) => isMissing(ids[f]));
+      // No quemar ids_attempts si el rate limit dejó IDs sin resolver: si no, tres
+      // ejecuciones bloqueadas dan la obra por perdida sin haberla buscado de verdad.
+      if (trackIds && !config.dryRun && !(limited && stillMissing)) {
         const meta = telemetryPatch(g, { source, confidence });
         for (const r of g.rows) telemetryUpdates.push({ id: r.id, patch: { ...meta } });
       }
-      if (Object.keys(found).length) {
+      if (got) {
         resolved += 1;
         applyToRows(g, ids);
-      } else if (blocked) {
+        if (limited && stillMissing) warnRate();
+      } else if (limited) {
         rateLimited += 1;
-        if (!rateLimitWarned) {
-          rateLimitWarned = true;
-          log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
-        }
+        warnRate();
       } else {
         unresolved += 1;
         if (g.known && Object.values(g.known).some((v) => !isMissing(v))) applyToRows(g, ids);
@@ -346,10 +418,7 @@ export async function runEnricher(db, config, log, deps = {}) {
       failures += 1;
       if (err?.code === 'ERR_RATE_LIMITED') {
         rateLimited += 1;
-        if (!rateLimitWarned) {
-          rateLimitWarned = true;
-          log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
-        }
+        warnRate();
       } else {
         log.warn(`enricher: error resolviendo "${g.label}": ${err.message}`);
       }

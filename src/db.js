@@ -15,6 +15,13 @@ import { log } from './logger.js';
 const TRANSIENT_CODES = new Set(['57014', '40001', '40P01', '08006', '08003', '08000', '53300', '53400', 'PGRST301', 'PGRST000', 'PGRST001', 'PGRST002', 'PGRST003']);
 const TRANSIENT_TEXT = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timeout|timed out|too many connections|network|502|503|504|429/i;
 
+/** Errores de datos (CHECK, varchar, tipo): reintentar el lote no los arregla. */
+const DATA_ERROR = /^(23514|23502|23503|23505|22001|22003|22P02|22007|42804)$/;
+function isDataError(err) {
+  if (err?.code && DATA_ERROR.test(String(err.code))) return true;
+  return /check constraint|value too long|invalid input syntax|invalid input value/i.test(String(err?.message || ''));
+}
+
 function isTransient(err) {
   if (!err) return false;
   if (err.code && TRANSIENT_CODES.has(String(err.code))) return true;
@@ -64,7 +71,11 @@ async function run(label, buildQuery, { retries = 4 } = {}) {
 export function createDb(config, { client } = {}) {
   const supabase = client || createClient(config.supabaseUrl, config.supabaseKey, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { 'x-application-name': 'torrents-maintenance' } },
+    global: {
+      headers: { 'x-application-name': 'torrents-maintenance' },
+      // Evita que una consulta colgada bloquee el job hasta el timeout de Actions.
+      fetch: (url, options = {}) => fetch(url, { ...options, signal: options.signal ?? AbortSignal.timeout(120_000) }),
+    },
   });
 
   const table = () => supabase.from(config.table);
@@ -104,14 +115,15 @@ export function createDb(config, { client } = {}) {
 
   /** Borra por lista de ids, en trozos. Respeta DRY_RUN. Devuelve nº de ids procesados. */
   async function deleteByIds(ids, label = 'delete') {
-    if (!ids.length) return 0;
+    const unique = [...new Set(ids)];
+    if (!unique.length) return 0;
     if (config.dryRun) {
-      log.info(`[DRY_RUN] ${label}: se borrarían ${ids.length} filas`);
-      stats.deleted += ids.length;
-      return ids.length;
+      log.info(`[DRY_RUN] ${label}: se borrarían ${unique.length} filas`);
+      stats.deleted += unique.length;
+      return unique.length;
     }
     let total = 0;
-    for (const part of chunk(ids, config.deleteChunkSize)) {
+    for (const part of chunk(unique, config.deleteChunkSize)) {
       const { count } = await run(`${label} (chunk ${part.length})`, () =>
         table().delete({ count: 'exact' }).in('id', part));
       stats.deleteCalls += 1;
@@ -228,18 +240,34 @@ export function createDb(config, { client } = {}) {
     }
 
     let total = 0;
+    const applyOne = async (u) => {
+      try {
+        await run(`${label} id=${u.id}`, () => table().update(u.patch).eq('id', u.id));
+        stats.updateCalls += 1;
+        return 1;
+      } catch (err) {
+        if (!isDataError(err)) throw err;
+        log.warn(`${label}: se omite id=${u.id} (no cumple el schema: ${err.message})`);
+        return 0;
+      }
+    };
     for (const part of chunk(valid, 200)) {
-      const viaRpc = await tryBulkRpc(part.map((u) => ({ id: String(u.id), patch: u.patch })));
+      let viaRpc = null;
+      try {
+        viaRpc = await tryBulkRpc(part.map((u) => ({ id: String(u.id), patch: u.patch })));
+      } catch (err) {
+        // Un CHECK/varchar en una fila tumba el lote entero. No es que falte la RPC:
+        // se aísla fila a fila y se sigue con el resto.
+        if (!isDataError(err)) throw err;
+        log.warn(`${label}: la RPC rechazó el lote (${err.code || 'datos'}). Reintentando fila a fila.`);
+        viaRpc = null;
+      }
       if (viaRpc !== null) {
         stats.updateCalls += 1;
         total += viaRpc;
         continue;
       }
-      const results = await mapWithConcurrency(part, config.updateConcurrency, async (u) => {
-        await run(`${label} id=${u.id}`, () => table().update(u.patch).eq('id', u.id));
-        stats.updateCalls += 1;
-        return 1;
-      });
+      const results = await mapWithConcurrency(part, config.updateConcurrency, applyOne);
       total += results.reduce((a, b) => a + b, 0);
     }
     stats.updated += total;

@@ -340,13 +340,38 @@ export function sameLanguageArray(a, b) {
 
 const RE_SUBS_MARKER = /(?<![A-Za-z])(?:multi[ ._-]?subs?|multiple[ ._-]?subtitles?|multi[ ._-]?subtitles?|multisub|subs?[ ._-]?multi|subtitles?|subt[ií]tulos?|subtitulad[oa]s?|legendado|softsubs?|hardsubs?|sub(?:s|bed)?)(?![A-Za-z])/i;
 const RE_DUAL_MARKER = /(?<![A-Za-z])(?:dual[ ._-]?(?:audio|áudio|lang(?:uage)?)?|multi[ ._-]?(?:audio|lang(?:uage)?s?)|tri[ ._-]?audio|doble[ ._-]?audio)(?![A-Za-z])/i;
-const RE_VOSE = /(?<![A-Za-z])VOSE(?![A-Za-z])/;
-const RE_VOSI = /(?<![A-Za-z])VOSI(?![A-Za-z])/;
-const RE_VOSTFR = /(?<![A-Za-z])VOSTFR(?![A-Za-z])/;
-const RE_VOSTA = /(?<![A-Za-z])VOSTA(?![A-Za-z])/;
+const RE_VOSE = /(?<![A-Za-z])VOSE(?![A-Za-z])/i;
+const RE_VOSI = /(?<![A-Za-z])VOSI(?![A-Za-z])/i;
+const RE_VOSTFR = /(?<![A-Za-z])VOSTFR(?![A-Za-z])/i;
+const RE_VOSTA = /(?<![A-Za-z])VOSTA(?![A-Za-z])/i;
 const RE_VO = /(?<![A-Za-z])V\.?O\.?(?:S\.?)?(?![A-Za-z])/;
 const RE_SUB_SPANISH = /(?<![A-Za-z])(?:sub(?:s|t[ií]tulos?|titulad[oa]s?|titles?)?[ ._:-]*(?:en[ ._])?(?:esp(?:a[ñn]ol)?|espa[ñn]ol|castellano|spanish|latino|lat|cast|es)(?![A-Za-z])|(?:esp(?:a[ñn]ol)?|espa[ñn]ol|castellano|spanish|latino)[ ._-]*sub(?:s|t[ií]tulos?|titulad[oa]s?|titles?|bed)?(?![A-Za-z]))/i;
 const RE_SUB_ENGLISH = /(?<![A-Za-z])(?:sub(?:s|titles?|bed)?[ ._:-]*(?:eng(?:lish)?|ingl[eé]s|en)(?![A-Za-z])|(?:eng(?:lish)?|ingl[eé]s)[ ._-]*sub(?:s|titles?|bed)?(?![A-Za-z]))/i;
+
+/**
+ * Códigos cortos en minúsculas sólo si van entre separadores de release
+ * (".spa.", "[eng]"). Con espacios, "the spa" o "the cast" no son idiomas.
+ */
+const SCENE_LANG = {
+  'spa-la': 'latino', 'spa-lat': 'latino', 'es-la': 'latino', 'es-mx': 'latino', 'es-419': 'latino',
+  'spa-es': 'spanish', 'es-es': 'spanish',
+  'por-br': 'portuguese', 'pt-br': 'portuguese',
+  spa: 'spanish', esp: 'spanish', cast: 'spanish', cas: 'spanish',
+  lat: 'latino', latam: 'latino',
+  eng: 'english', jap: 'japanese', jpn: 'japanese',
+  fre: 'french', fra: 'french', ger: 'german', ita: 'italian',
+  por: 'portuguese', rus: 'russian', kor: 'korean', chi: 'chinese',
+};
+// El código tiene que terminar de verdad: si no, "SPA-LA" se leía como "SPA".
+const SCENE_CODE_RE = /(?:^|[.[\]_{}()-])(spa-la|spa-lat|es-la|es-mx|es-419|spa-es|es-es|por-br|pt-br|latam|spa|esp|cast|cas|lat|eng|jap|jpn|fre|fra|ger|ita|por|rus|kor|chi)(?![A-Za-z0-9-])/gi;
+
+function addSceneCodes(text, bucket) {
+  if (!text) return;
+  for (const m of text.matchAll(new RegExp(SCENE_CODE_RE.source, 'gi'))) {
+    const lang = SCENE_LANG[m[1].toLowerCase()];
+    if (lang) bucket.add(lang);
+  }
+}
 
 /**
  * Infiere idiomas de audio y subtítulos a partir del título original.
@@ -399,6 +424,8 @@ export function detectTitleLanguages(title, groupProfile = null) {
 
   for (const l of detectLanguagesInText(audioText)) audio.add(l);
   for (const l of detectLanguagesInText(subsZone)) subtitles.add(l);
+  addSceneCodes(audioText, audio);
+  addSceneCodes(subsZone, subtitles);
 
   // Los idiomas anteriores a un marcador tipo "Spanish Sub" ya fueron capturados
   // por RE_SUB_SPANISH/RE_SUB_ENGLISH y eliminados de la zona de audio.

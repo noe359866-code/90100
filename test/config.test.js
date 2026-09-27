@@ -13,6 +13,23 @@ test('config: se importa y valida credenciales obligatorias', async () => {
   assert.throws(() => validateConfig({ ...config, supabaseUrl: 'x', supabaseKey: 'y', dedupe: { ...config.dedupe, otherLanguagePolicy: 'nope' } }), /DEDUP_OTHER_LANGUAGE_POLICY/);
 });
 
+test('config: MAX_DELETE_RATIO acepta porcentaje y los días negativos se recortan', async () => {
+  const previousRatio = process.env.MAX_DELETE_RATIO;
+  const previousDays = process.env.DEAD_AFTER_DAYS;
+  process.env.MAX_DELETE_RATIO = '95';
+  process.env.DEAD_AFTER_DAYS = '-3';
+  try {
+    const { config: fresh } = await import('../src/config.js?ratio=1');
+    assert.equal(fresh.maxDeleteRatio, 0.95);
+    assert.equal(fresh.dead.afterDays, 0);
+  } finally {
+    if (previousRatio === undefined) delete process.env.MAX_DELETE_RATIO;
+    else process.env.MAX_DELETE_RATIO = previousRatio;
+    if (previousDays === undefined) delete process.env.DEAD_AFTER_DAYS;
+    else process.env.DEAD_AFTER_DAYS = previousDays;
+  }
+});
+
 test('index: el módulo principal carga sin errores de sintaxis', async () => {
   // Importar src/index.js ejecutaría main(); comprobamos en su lugar los módulos que orquesta.
   for (const m of ['../src/db.js', '../src/logger.js', '../src/steps/01-adultFilter.js', '../src/steps/02-sizeFilter.js', '../src/steps/03-deadPurger.js', '../src/steps/04-normalizer.js', '../src/steps/05-enricher.js', '../src/steps/06-deduplicator.js', '../src/apis/anilist.js', '../src/apis/kitsu.js', '../src/apis/tmdb.js']) {

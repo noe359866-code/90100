@@ -4,7 +4,7 @@
 -- que lleva más de DEAD_AFTER_DAYS sin actualizarse. El problema: si tienes un
 -- trigger `before update` que refresca `updated_at` en CADA update, las propias
 -- escrituras del mantenimiento (normalizador, enriquecedor...) reactivan filas
-que el scraper no ha tocado en meses, y el paso 3 deja de borrar nada.
+-- que el scraper no ha tocado en meses, y el paso 3 deja de borrar nada.
 --
 -- Además, en el schema de ejemplo hay DOS triggers con la misma función
 -- (trg_torrents_updated_at y update_torrents_updated_at): se ejecutan los dos.

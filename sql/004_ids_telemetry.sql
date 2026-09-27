@@ -17,6 +17,8 @@ alter table public.torrents add column if not exists ids_attempts    integer not
 
 -- El enriquecedor filtra por estas dos cosas, así que el índice acelera el paso.
 create index if not exists torrents_ids_checked_at_idx on public.torrents using btree (ids_checked_at);
+create index if not exists torrents_ids_attempts_idx on public.torrents (ids_attempts)
+  where ids_attempts > 0;
 
 -- Ajustes relacionados (variables de entorno / repository variables):
 --   ENRICH_TRACK_IDS_COLUMNS  true     → usar estas columnas (si existen)

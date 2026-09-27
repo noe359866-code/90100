@@ -115,3 +115,21 @@ test('enricher: con AniList en pausa por rate limit no reintenta obra por obra',
   assert.ok(rows.every((r) => r.anilist_id === null && r.mal_id === null), 'no debe inventar IDs');
   assert.equal(result.updated, 0);
 });
+
+test('enricher: un rate limit no quema ids_attempts', async () => {
+  warnings.length = 0;
+  const rows = seed().map((r) => ({ ...r, ids_checked_at: null, ids_attempts: 0, ids_source: null, ids_confidence: null }));
+  const { client } = createFakeSupabase(rows);
+  const config = baseConfig();
+  config.enrich = { ...config.enrich, trackIdsColumns: true, recheckAfterDays: 14, maxAttempts: 3 };
+  const db = createDb(config, { client });
+  await runNormalizer(db, config, silentLog);
+  await runEnricher(db, config, verboseLog, {
+    anilist: blockedAniList(),
+    kitsu: { byAniListId: async () => null, byMalId: async () => null, findBest: async () => null, stats: () => ({ throttles: 0, disabled: false }) },
+    tmdb: { findBest: async () => null, externalIds: async () => ({ imdb_id: null }), stats: () => ({ throttles: 0, disabled: false }) },
+  });
+  const stored = client.from('torrents').store.tables.torrents;
+  assert.ok(stored.every((r) => r.ids_attempts === 0 || r.ids_attempts == null), 'no debe contar un intento que no pudo consultar');
+  assert.ok(stored.every((r) => r.ids_checked_at == null), 'no debe marcar la obra como revisada');
+});
