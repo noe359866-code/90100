@@ -230,3 +230,40 @@ test('telemetría: avisa si la RPC está obsoleta y no guarda las columnas ids_*
     'debe avisar de que hay que reejecutar sql/002_bulk_update_rpc.sql',
   );
 });
+
+test('telemetría: una migración parcial degrada la telemetría sin romper los updates', async () => {
+  const log = makeLog();
+  const { client, store } = createFakeSupabase([animeRow(1, '[SubsPlease] Sousou no Frieren - 09 (1080p) [ABCDEF12].mkv')]);
+
+  // La tabla tiene ids_checked_at/ids_attempts/ids_confidence pero NO ids_source
+  // (migración a medias): PostgREST responde PGRST204 al seleccionarla.
+  const errorThenable = {
+    limit: () => errorThenable,
+    then: (resolve, reject) =>
+      Promise.resolve({ data: null, error: { code: 'PGRST204', message: 'column "ids_source" does not exist' } }).then(resolve, reject),
+  };
+  const originalFrom = client.from.bind(client);
+  client.from = (table) => {
+    const q = originalFrom(table);
+    const originalSelect = q.select.bind(q);
+    q.select = (columns = '*', opts = {}) =>
+      String(columns).split(',').map((c) => c.trim()).includes('ids_source') ? errorThenable : originalSelect(columns, opts);
+    return q;
+  };
+
+  const cfg = config();
+  const db = createDb(cfg, { client });
+  await runNormalizer(db, cfg, log);
+  const apis = noApis();
+  apis.anilist.findBest = async () => ({ anilist_id: 154587, mal_id: 52991, englishTitle: 'Frieren', title: 'Sousou no Frieren', year: 2023, score: 0.93 });
+  apis.kitsu.byAniListId = async () => 46474;
+  const result = await runEnricher(db, cfg, log, apis);
+
+  assert.equal(result.resolved, 1);
+  const row = store.tables.torrents[0];
+  assert.equal(row.anilist_id, 154587);
+  assert.ok(row.ids_checked_at, 'ids_checked_at existe y se escribe');
+  assert.equal(row.ids_attempts, 1);
+  assert.equal(row.ids_confidence, 0.93);
+  assert.equal(row.ids_source, null, 'ids_source no existe: el parche no debe intentar escribirla');
+});

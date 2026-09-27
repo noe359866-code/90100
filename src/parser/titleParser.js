@@ -150,6 +150,9 @@ const RE_LANG_CUT = /(?<![A-Za-z0-9])(Castellano|Latino|Espa[ñn]ol|VOSE|VOSI|Su
 const RE_LANG_TRAILING = /(?:(?:^|[\s\-–—_.]+)(?:Spanish|English|Japanese|Ingl[eé]s|French|German|Italian|Portuguese|Dubbed|Subbed|Dual|Multi|Latino|Castellano|Espa[ñn]ol|VOSE|VO|HD|HQ|Torrent|Descargar|Download|Online|Gratis|Free))+\s*$/i;
 
 const RE_MISC_NOISE = /(?<![A-Za-z0-9])(?:Descargar|Download|Torrent|Estreno|Ver[ ._]Online|Online|Gratis|Free|Peliculas?|Pel[ií]culas?|Series?[ ._]Completa)(?![A-Za-z0-9])/i;
+/** Variantes "al inicio"/"al final" de RE_MISC_NOISE, precompiladas (polishTitle corre por cada fila). */
+const RE_MISC_NOISE_LEAD = new RegExp(`^(?:\\s*${RE_MISC_NOISE.source}[\\s._-]*)+`, 'i');
+const RE_MISC_NOISE_TRAIL = new RegExp(`(?:[\\s._-]*${RE_MISC_NOISE.source}\\s*)+$`, 'i');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -163,10 +166,29 @@ const isYearLike = (numStr) => {
 
 const hasLettersBefore = (text, index) => /[A-Za-z\u00C0-\u024F\u3040-\u9fff]/.test(text.slice(0, index));
 
+/**
+ * Regex global cacheada por (source, flags). `parseTitle` se ejecuta sobre cada
+ * fila de la tabla y recompilar las mismas decenas de RegExp por llamada era un
+ * coste innecesario. Al ser compartidas SIEMPRE se resetea `lastIndex` al
+ * obtenerlas; los bucles `exec` son síncronos y no anidados sobre la misma
+ * regex, así que no hay riesgo de interferencia.
+ */
+const globalRegexCache = new Map();
+function globalRegex(re) {
+  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
+  const key = `${re.source}\u0000${flags}`;
+  let g = globalRegexCache.get(key);
+  if (!g) {
+    g = new RegExp(re.source, flags);
+    globalRegexCache.set(key, g);
+  }
+  g.lastIndex = 0;
+  return g;
+}
+
 /** Ejecuta `re` sobre `text` y devuelve el match más temprano con índice > 0 (o >= 0 si allowZero). */
 function firstMatch(re, text, { allowZero = false } = {}) {
-  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-  const g = new RegExp(re.source, flags);
+  const g = globalRegex(re);
   let m;
   while ((m = g.exec(text)) !== null) {
     if (m.index > 0 || allowZero) return m;
@@ -178,7 +200,7 @@ function firstMatch(re, text, { allowZero = false } = {}) {
 /** Extrae temporada/episodio de las nomenclaturas con temporada. */
 function extractSeasonEpisode(text) {
   for (const pat of EPISODE_PATTERNS) {
-    const g = new RegExp(pat.re.source, pat.re.flags.includes('g') ? pat.re.flags : `${pat.re.flags}g`);
+    const g = globalRegex(pat.re);
     let m;
     while ((m = g.exec(text)) !== null) {
       if (pat.requireLettersBefore && !hasLettersBefore(text, m.index)) continue;
@@ -197,7 +219,7 @@ function extractAbsoluteEpisode(text, from = 0) {
   const slice = text.slice(from);
   let best = null;
   for (const pat of ABSOLUTE_PATTERNS) {
-    const g = new RegExp(pat.re.source, pat.re.flags);
+    const g = globalRegex(pat.re);
     let m;
     while ((m = g.exec(slice)) !== null) {
       const num = m[1];
@@ -267,8 +289,7 @@ function matchIsMetadataTag(text, match) {
 }
 
 function replaceMetadataTags(text, re) {
-  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-  const g = new RegExp(re.source, flags);
+  const g = globalRegex(re);
   return text.replace(g, (m, ...rest) => {
     const index = rest[rest.length - 2];
     const groups = rest.slice(0, -2);
@@ -299,8 +320,8 @@ function polishTitle(raw) {
   t = t.replace(/\(\s*\)|\[\s*\]|\{\s*\}/g, ' ');
   // Ruido de webs sólo en los extremos ("Descargar Pelicula X", "X Torrent"); si vaciase el título, se conserva.
   const denoised = t
-    .replace(new RegExp(`^(?:\\s*${RE_MISC_NOISE.source}[\\s._-]*)+`, 'i'), '')
-    .replace(new RegExp(`(?:[\\s._-]*${RE_MISC_NOISE.source}\\s*)+$`, 'i'), '');
+    .replace(RE_MISC_NOISE_LEAD, '')
+    .replace(RE_MISC_NOISE_TRAIL, '');
   if (denoised.trim().length >= 2) t = denoised;
   t = t.replace(RE_LANG_TRAILING, '');
   t = t.replace(/^(?:2160p|1080p|1080i|720p|576p|480p|360p|4k|uhd|fhd|3840x2160|1920x1080|1280x720)[ ._-]+/i, '');
@@ -327,7 +348,7 @@ function fallbackTitle(stripped) {
       t = replaceMetadataTags(t, re);
       continue;
     }
-    t = t.replace(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`), ' ');
+    t = t.replace(globalRegex(re), ' ');
   }
   return polishTitle(t);
 }
@@ -457,7 +478,7 @@ export function parseTitle(rawTitle) {
   if (absStripped && absStripped.index > 0) cutCandidates.push(absStripped.index);
 
   const completeTag = (() => {
-    const g = new RegExp(RE_COMPLETE.source, RE_COMPLETE.flags.includes('g') ? RE_COMPLETE.flags : `${RE_COMPLETE.flags}g`);
+    const g = globalRegex(RE_COMPLETE);
     let m;
     while ((m = g.exec(full)) !== null) {
       if (matchIsMetadataTag(full, m)) return m;
@@ -507,7 +528,7 @@ export function parseTitle(rawTitle) {
   const bd = RE_BIT_DEPTH.exec(full);
   if (bd) result.bitDepth = bd[1] ? +bd[1] : 10;
 
-  for (const m of full.matchAll(new RegExp(RE_FLAGS.source, 'gi'))) {
+  for (const m of full.matchAll(globalRegex(RE_FLAGS))) {
     if (matchIsMetadataTag(full, m)) result.flags.push(m[1].toLowerCase());
   }
   const dualMulti = RE_DUAL_MULTI.exec(full);
@@ -520,7 +541,7 @@ export function parseTitle(rawTitle) {
     if (m) cutCandidates.push(m.index);
   }
   for (const re of [RE_COMPLETE, RE_FLAGS]) {
-    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    const g = globalRegex(re);
     let m;
     while ((m = g.exec(stripped)) !== null) {
       if (m.index > 0 && matchIsMetadataTag(stripped, m)) cutCandidates.push(m.index);

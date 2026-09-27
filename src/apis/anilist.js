@@ -53,6 +53,9 @@ export function createAniListClient({
         timeoutMs: 15000,
         retries: 3,
         onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
+        // El reintento espera el cooldown del penalty box: reintentar antes sólo
+        // provoca otro 429 y alarga el bloqueo.
+        minWaitMs: () => limiter.stats().cooldownMs,
         onRetry: (err, attempt, wait) => log?.warn(`AniList: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
       }),
     ).then(

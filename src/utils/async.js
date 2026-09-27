@@ -164,8 +164,11 @@ export function createRateLimiter({
 /**
  * Reintentos con backoff exponencial + jitter.
  * `shouldRetry(err)` decide si un error es transitorio.
+ * `minWaitMs` (número o función) fija una espera mínima adicional — p. ej. el
+ * cooldown del penalty box del limitador, para que un reintento no salga antes
+ * de que el servidor se haya "enfriado" (reintentar pronto sólo empeora el 429).
  */
-export async function withRetry(fn, { retries = 4, baseMs = 500, maxMs = 15000, shouldRetry = () => true, onRetry } = {}) {
+export async function withRetry(fn, { retries = 4, baseMs = 500, maxMs = 15000, shouldRetry = () => true, onRetry, minWaitMs } = {}) {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -175,7 +178,8 @@ export async function withRetry(fn, { retries = 4, baseMs = 500, maxMs = 15000, 
       if (attempt >= retries || !shouldRetry(err)) throw err;
       const retryAfter = err?.retryAfterMs;
       const backoff = Math.min(maxMs, baseMs * 2 ** attempt) * (0.7 + Math.random() * 0.6);
-      const wait = Math.max(retryAfter || 0, backoff);
+      const floor = typeof minWaitMs === 'function' ? minWaitMs() : minWaitMs;
+      const wait = Math.max(retryAfter || 0, backoff, floor || 0);
       onRetry?.(err, attempt + 1, wait);
       await sleep(wait);
       attempt += 1;

@@ -8,6 +8,9 @@
  *   3. Anime  → AniList (GraphQL) → anilist_id + mal_id; Kitsu por mapping exacto
  *              (anilist→kitsu / mal→kitsu) o búsqueda por texto → kitsu_id.
  *              Opcionalmente TMDB (tv) con el título inglés de AniList → tmdb_id + imdb_id.
+ *      Si AniList está saturado (429) o no encuentra la obra, Kitsu resuelve por
+ *      texto y sus mappings rescatan anilist_id/mal_id; TMDB se busca igualmente
+ *      (con las variantes del parser y el título canónico de Kitsu).
  *      Movie/Series → TMDB search → tmdb_id → external_ids → imdb_id.
  *   4. Cada match se valida por similitud de título (+ año) para evitar falsos positivos.
  *
@@ -38,17 +41,24 @@ export const ID_TELEMETRY_FIELDS = ['ids_checked_at', 'ids_source', 'ids_confide
 const isMissing = (v) => v === null || v === undefined || v === '' || v === 0;
 
 /**
- * ¿Tiene la tabla las columnas de telemetría? Si no, el enriquecimiento funciona
- * igual pero sin control de reintentos (se vuelven a consultar todas las obras).
+ * ¿Qué columnas de telemetría tiene la tabla? (opcionales; ver sql/004_ids_telemetry.sql).
+ * Se comprueba CADA columna por separado: una migración parcial debe degradar la
+ * telemetría, no romper los updates por una columna inexistente.
+ * @returns {Promise<string[]>} columnas disponibles (vacío si faltan las imprescindibles)
  */
 async function detectIdTelemetry(db, table) {
-  try {
-    const { error } = await db.supabase.from(table).select('ids_checked_at,ids_attempts').limit(1);
-    if (error) return false;
-    return true;
-  } catch {
-    return false;
+  const available = [];
+  for (const col of ID_TELEMETRY_FIELDS) {
+    try {
+      const { error } = await db.supabase.from(table).select(col).limit(1);
+      if (!error) available.push(col);
+    } catch {
+      // la columna no existe en la tabla
+    }
   }
+  // Sin ids_checked_at/ids_attempts no se pueden controlar los reintentos; el resto son informativos.
+  if (!available.includes('ids_checked_at') || !available.includes('ids_attempts')) return [];
+  return available;
 }
 
 /** Decide qué IDs le faltan a una fila según su tipo y la configuración. */
@@ -122,21 +132,48 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
       }
     }
     // --- Kitsu ---
-    // No se salta porque AniList esté en pausa: Kitsu puede resolver igual.
-    if (need('kitsu_id')) {
+    // No se salta aunque AniList esté en pausa: Kitsu resuelve kitsu_id y, con
+    // sus mappings, puede rescatar también anilist_id/mal_id cuando AniList da
+    // 429 o no encuentra la obra.
+    let kitsuTitle = null;
+    if (need('kitsu_id') || need('anilist_id') || need('mal_id')) {
       const anilistId = known.anilist_id || found.anilist_id;
       const malId = known.mal_id || found.mal_id;
-      let kitsuId = anilistId ? await guard(() => kitsu.byAniListId(anilistId)) : null;
-      if (!kitsuId && malId) kitsuId = await guard(() => kitsu.byMalId(malId));
-      if (!kitsuId) {
-        const hit = await guard(() => kitsu.findBest(englishTitle ? [...variants, englishTitle] : variants, { year, minSimilarity }));
-        kitsuId = hit?.kitsu_id ?? null;
+      let kitsuId = isMissing(known.kitsu_id) ? null : Number(known.kitsu_id);
+      if (!kitsuId && need('kitsu_id')) {
+        kitsuId = anilistId ? await guard(() => kitsu.byAniListId(anilistId)) : null;
+        if (!kitsuId && malId) kitsuId = await guard(() => kitsu.byMalId(malId));
+        let hit = null;
+        if (!kitsuId) {
+          hit = (await guard(() => kitsu.findBest(englishTitle ? [...variants, englishTitle] : variants, { year, minSimilarity }))) ?? null;
+          kitsuId = hit?.kitsu_id ?? null;
+          kitsuTitle = hit?.title ?? null;
+        }
+        if (kitsuId) {
+          found.kitsu_id = kitsuId;
+          // El mapping exacto no tiene score; la búsqueda por texto sí.
+          credit('kitsu', hit?.score ?? null);
+        }
+        log.debug(`Kitsu ${kitsuId ? '✓ ' + kitsuId : '✗'} "${group.label}"`);
       }
-      if (kitsuId) {
-        found.kitsu_id = kitsuId;
-        credit('kitsu');
+      // Fallback contra el rate limit de AniList: los mappings de la entrada de
+      // Kitsu (anilist/anime, myanimelist/anime) rellenan los IDs que AniList no
+      // pudo darnos (429, penalty box o simplemente sin match).
+      if (kitsuId && (need('anilist_id') || need('mal_id')) && typeof kitsu.externalIds === 'function') {
+        const ext = await guard(() => kitsu.externalIds(kitsuId));
+        const rescued = [];
+        if (ext?.anilist_id && need('anilist_id')) {
+          found.anilist_id = ext.anilist_id;
+          credit('kitsu');
+          rescued.push(`anilist=${ext.anilist_id}`);
+        }
+        if (ext?.mal_id && need('mal_id')) {
+          found.mal_id = ext.mal_id;
+          credit('kitsu');
+          rescued.push(`mal=${ext.mal_id}`);
+        }
+        if (rescued.length) log.debug(`Kitsu mappings ✓ "${group.label}" → ${rescued.join(' ')} (fallback)`);
       }
-      log.debug(`Kitsu ${kitsuId ? '✓ ' + kitsuId : '✗'} "${group.label}"`);
     }
     // --- TMDB (opcional para anime) ---
     if (tmdb && (need('tmdb_id') || need('imdb_id'))) {
@@ -144,14 +181,17 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
       let kind = 'tv';
       let kindKnown = false;
       if (!tmdbId) {
-        const tmdbVariants = englishTitle ? [englishTitle, ...variants] : variants;
+        // Sin el título inglés de AniList (p. ej. por un 429) se buscan las
+        // variantes del parser más el título canónico de Kitsu.
+        const extraTitles = [...new Set([englishTitle, kitsuTitle].filter(Boolean))];
+        const tmdbVariants = extraTitles.length ? [...extraTitles, ...variants] : variants;
         let hit = await guard(() => tmdb.findBest('tv', tmdbVariants, { year, minSimilarity }));
         if (!hit && !group.hasEpisode) {
           hit = await guard(() => tmdb.findBest('movie', tmdbVariants, { year, minSimilarity }));
         }
         if (hit) {
           tmdbId = hit.tmdb_id;
-          kind = hit.kind;
+          kind = hit.kind || kind;
           kindKnown = true;
           credit('tmdb', hit.score);
           if (need('tmdb_id')) found.tmdb_id = tmdbId;
@@ -169,12 +209,20 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
       }
     }
   } else if (tmdb) {
-    const kind = group.type === 'movie' ? 'movie' : 'tv';
+    let kind = group.type === 'movie' ? 'movie' : 'tv';
+    let kindKnown = false;
     let tmdbId = known.tmdb_id || null;
     if (!tmdbId && need('tmdb_id')) {
-      const hit = await guard(() => tmdb.findBest(kind, variants, { year, minSimilarity }));
+      let hit = await guard(() => tmdb.findBest(kind, variants, { year, minSimilarity }));
+      // Tipo inferido por el parser (filas sin `type` en la BD): si el tipo
+      // "principal" no da match, se prueba el otro antes de rendirse.
+      if (!hit && group.typeGuessed && !group.hasEpisode) {
+        hit = await guard(() => tmdb.findBest(kind === 'movie' ? 'tv' : 'movie', variants, { year, minSimilarity }));
+      }
       if (hit) {
         tmdbId = hit.tmdb_id;
+        kind = hit.kind || kind;
+        kindKnown = true;
         found.tmdb_id = tmdbId;
         credit('tmdb', hit.score);
         log.debug(`TMDB ✓ "${group.label}" → ${kind}/${tmdbId} (${hit.title} ${hit.year ?? ''}, score ${hit.score.toFixed(2)})`);
@@ -183,7 +231,12 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
       }
     }
     if (tmdbId && need('imdb_id')) {
-      const ext = await guard(() => tmdb.externalIds(kind, tmdbId));
+      let ext = await guard(() => tmdb.externalIds(kind, tmdbId));
+      // tmdb_id ya guardado + tipo inferido: el id puede ser del otro tipo (movie vs tv).
+      if (!kindKnown && group.typeGuessed && !cleanImdbId(ext?.imdb_id)) {
+        const otherExt = await guard(() => tmdb.externalIds(kind === 'movie' ? 'tv' : 'movie', tmdbId));
+        if (cleanImdbId(otherExt?.imdb_id)) ext = otherExt;
+      }
       const extImdb = cleanImdbId(ext?.imdb_id);
       if (extImdb) found.imdb_id = extImdb;
     }
@@ -215,7 +268,8 @@ export async function runEnricher(db, config, log, deps = {}) {
   const tmdb = deps.tmdb || createTmdbClient({ apiKey: config.enrich.tmdbApiKey, requestsPerSecond: config.enrich.tmdbPerSecond, log });
 
   const cleanCol = config.cleanTitleColumn;
-  const trackIds = config.enrich.trackIdsColumns && (await detectIdTelemetry(db, config.table));
+  const telemetryCols = config.enrich.trackIdsColumns ? await detectIdTelemetry(db, config.table) : [];
+  const trackIds = telemetryCols.length > 0;
   if (config.enrich.trackIdsColumns && !trackIds) {
     log.info('enricher: la tabla no tiene ids_checked_at/ids_attempts → se revisarán todas las obras huérfanas cada ejecución (ver sql/004_ids_telemetry.sql).');
   }
@@ -277,6 +331,8 @@ export async function runEnricher(db, config, log, deps = {}) {
           g = {
             key,
             type,
+            /** `type` inferido por el parser (la fila no lo tiene en la BD): el match de TMDB se intenta en ambos tipos. */
+            typeGuessed: !row.type,
             searchKey: parsed.searchKey,
             seasonKey,
             label: parsed.cleanTitle + (parsed.year ? ` (${parsed.year})` : '') + (seasonKey ? ` S${seasonKey}` : ''),
@@ -290,6 +346,7 @@ export async function runEnricher(db, config, log, deps = {}) {
           groups.set(key, g);
         }
         g.rows.push({ id: row.id, needed });
+        if (!row.type) g.typeGuessed = true;
         if (trackIds) g.attempts = Math.max(g.attempts ?? 0, Number(row.ids_attempts) || 0);
         for (const f of needed) g.needed.add(f);
         for (const f of ID_FIELDS) if (!isMissing(row[f]) && isMissing(g.known[f])) g.known[f] = row[f];
@@ -325,6 +382,7 @@ export async function runEnricher(db, config, log, deps = {}) {
       for (const f of g.needed) base.needed.add(f);
       for (const [f, v] of Object.entries(g.known)) if (isMissing(base.known[f])) base.known[f] = v;
       if (g.hasEpisode) base.hasEpisode = true;
+      if (g.typeGuessed) base.typeGuessed = true;
       base.attempts = Math.max(base.attempts ?? 0, g.attempts ?? 0);
     }
     if (years.length === 1) base.year = years[0];
@@ -374,12 +432,16 @@ export async function runEnricher(db, config, log, deps = {}) {
   // --- 3. Consultas a APIs ---------------------------------------------------------
   const checkedAt = new Date().toISOString();
   /** Telemetría: cuándo se ha mirado esta obra, con qué API y con qué confianza. */
-  const telemetryPatch = (g, { source, confidence }) => ({
-    ids_checked_at: checkedAt,
-    ids_attempts: (g.attempts ?? 0) + 1,
-    ids_source: source || 'none',
-    ids_confidence: typeof confidence === 'number' && Number.isFinite(confidence) ? Math.round(confidence * 1000) / 1000 : null,
-  });
+  const telemetryPatch = (g, { source, confidence }) => {
+    const patch = {};
+    if (telemetryCols.includes('ids_checked_at')) patch.ids_checked_at = checkedAt;
+    if (telemetryCols.includes('ids_attempts')) patch.ids_attempts = (g.attempts ?? 0) + 1;
+    if (telemetryCols.includes('ids_source')) patch.ids_source = source || 'none';
+    if (telemetryCols.includes('ids_confidence')) {
+      patch.ids_confidence = typeof confidence === 'number' && Number.isFinite(confidence) ? Math.round(confidence * 1000) / 1000 : null;
+    }
+    return patch;
+  };
 
   let resolved = 0;
   let unresolved = 0;
