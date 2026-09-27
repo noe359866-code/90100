@@ -122,6 +122,16 @@ export const config = Object.freeze({
     /** Tasa mínima a la que se degrada Kitsu cuando devuelve 429. */
     kitsuMinPerMinute: Math.max(toInt(env.KITSU_MIN_RPM, 15), 1),
     tmdbPerSecond: Math.max(toInt(env.TMDB_RPS, 20), 1),
+
+    // --- Telemetría de resolución (columnas opcionales de la tabla) ------------
+    // Si la tabla tiene ids_checked_at / ids_source / ids_confidence / ids_attempts
+    // se registra cada consulta: así no se reintentan a diario las mismas obras
+    // imposibles (que es lo que quema la cuota de AniList/TMDB).
+    trackIdsColumns: toBool(env.ENRICH_TRACK_IDS_COLUMNS, true),
+    /** Días antes de volver a consultar una obra que no se pudo resolver. */
+    recheckAfterDays: Math.max(toInt(env.ENRICH_RECHECK_AFTER_DAYS, 14), 0),
+    /** Intentos máximos por obra (0 = ilimitado). */
+    maxAttempts: Math.max(toInt(env.ENRICH_MAX_ATTEMPTS, 3), 0),
   },
 
   // --- Paso 7: deduplicación ----------------------------------------------

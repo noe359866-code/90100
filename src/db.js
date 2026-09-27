@@ -252,5 +252,5 @@ export function createDb(config, { client } = {}) {
     return count ?? 0;
   }
 
-  return { supabase, table, iterateRows, countWhere, deleteByIds, deleteWhere, updateRows, healthcheck, stats };
+  return { supabase, table, iterateRows, countWhere, deleteByIds, deleteWhere, updateRows, healthcheck, isRpcAvailable: () => rpcAvailable === true, stats };
 }

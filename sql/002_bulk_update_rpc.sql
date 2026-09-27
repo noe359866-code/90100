@@ -38,7 +38,13 @@ begin
     tmdb_id          = case when u.patch ? 'tmdb_id'          then p.tmdb_id          else t.tmdb_id end,
     anilist_id       = case when u.patch ? 'anilist_id'       then p.anilist_id       else t.anilist_id end,
     kitsu_id         = case when u.patch ? 'kitsu_id'         then p.kitsu_id         else t.kitsu_id end,
-    mal_id           = case when u.patch ? 'mal_id'           then p.mal_id           else t.mal_id end
+    mal_id           = case when u.patch ? 'mal_id'           then p.mal_id           else t.mal_id end,
+    -- Telemetría de resolución (opcional; ver sql/004_ids_telemetry.sql).
+    -- Si tu tabla no tiene estas columnas, elimina estas cuatro líneas.
+    ids_checked_at   = case when u.patch ? 'ids_checked_at'   then p.ids_checked_at   else t.ids_checked_at end,
+    ids_source       = case when u.patch ? 'ids_source'       then p.ids_source       else t.ids_source end,
+    ids_confidence   = case when u.patch ? 'ids_confidence'   then p.ids_confidence   else t.ids_confidence end,
+    ids_attempts     = case when u.patch ? 'ids_attempts'     then p.ids_attempts     else t.ids_attempts end
   from (
     select (x->>'id') as id, (x->'patch') as patch
     from jsonb_array_elements(updates) as x

@@ -16,6 +16,21 @@ import { parseTitle } from '../parser/titleParser.js';
 import { normalizeLanguageArray, sameLanguageArray } from '../parser/languages.js';
 import { normalizeCodec, normalizeQuality, normalizeType } from '../parser/normalizers.js';
 
+/**
+ * Longitudes máximas de las columnas VARCHAR que escribe este paso, según el
+ * schema típico (`type varchar(10)`, `codec varchar(20)`, `quality varchar(20)`...).
+ * Si tu tabla usa otros tamaños, ajústalos aquí: sin esto, un valor más largo
+ * que la columna aborta el UPDATE con el error 22001 de Postgres.
+ */
+const VARCHAR_LIMITS = { type: 10, codec: 20, quality: 20, release_group: 100, hdr_format: 20 };
+
+/** Recorta un valor de texto para que quepa en su columna. */
+export const fitToColumn = (column, value) => {
+  const limit = VARCHAR_LIMITS[column];
+  if (!limit || typeof value !== 'string' || value.length <= limit) return value;
+  return value.slice(0, limit);
+};
+
 const toIntOrNull = (v) => {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -46,6 +61,7 @@ export function buildNormalizationPatch(row, config) {
   } else if (opts.overwriteType && parsed.type !== currentType && parsed.typeConfidence >= opts.typeConfidence) {
     patch.type = parsed.type;
   }
+  if (patch.type !== undefined) patch.type = fitToColumn('type', patch.type);
   const finalType = patch.type || currentType;
 
   // --- Temporada / episodio ---
@@ -70,9 +86,9 @@ export function buildNormalizationPatch(row, config) {
 
   // --- Codec / calidad ---
   const codec = normalizeCodec(row.codec) || parsed.codec || null;
-  if (codec && codec !== row.codec) patch.codec = codec;
+  if (codec && codec !== row.codec) patch.codec = fitToColumn('codec', codec);
   const quality = normalizeQuality(row.quality) || parsed.quality || null;
-  if (quality && quality !== row.quality) patch.quality = quality;
+  if (quality && quality !== row.quality) patch.quality = fitToColumn('quality', quality);
 
   // --- Idiomas ---
   let audio = normalizeLanguageArray(row.audio);
