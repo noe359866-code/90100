@@ -1,0 +1,81 @@
+name: Torrents maintenance (Supabase)
+
+on:
+  schedule:
+    # Todos los días a las 04:15 UTC
+    - cron: '15 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Simular sin escribir en la base de datos'
+        type: boolean
+        default: false
+      steps:
+        description: 'Pasos a ejecutar (all | adult,size,dead,normalize,enrich,dedupe)'
+        type: string
+        default: 'all'
+      log_level:
+        description: 'Nivel de log'
+        type: choice
+        options: [info, debug, warn]
+        default: info
+      enrich_max_lookups:
+        description: 'Máximo de obras a resolver vía API en esta ejecución'
+        type: string
+        default: '300'
+
+# Evita ejecuciones solapadas (borrados/actualizaciones concurrentes)
+concurrency:
+  group: torrents-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance:
+    name: Limpieza, normalización, enriquecimiento y deduplicación
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci --no-audit --no-fund
+
+      - name: Tests del parser
+        run: npm test
+
+      - name: Ejecutar mantenimiento
+        env:
+          # --- Secrets (Settings → Secrets and variables → Actions) ---
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+
+          # --- Parámetros de ejecución ---
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || vars.DRY_RUN || 'false' }}
+          STEPS: ${{ github.event_name == 'workflow_dispatch' && inputs.steps || vars.STEPS || 'all' }}
+          LOG_LEVEL: ${{ github.event_name == 'workflow_dispatch' && inputs.log_level || vars.LOG_LEVEL || 'info' }}
+          ENRICH_MAX_LOOKUPS: ${{ github.event_name == 'workflow_dispatch' && inputs.enrich_max_lookups || vars.ENRICH_MAX_LOOKUPS || '300' }}
+
+          # --- Ajustes opcionales (Repository variables; ver .env.example) ---
+          TABLE_NAME: ${{ vars.TABLE_NAME || 'torrents' }}
+          CLEAN_TITLE_COLUMN: ${{ vars.CLEAN_TITLE_COLUMN || 'title_text' }}
+          MIN_MOVIE_MB: ${{ vars.MIN_MOVIE_MB || '150' }}
+          MIN_SERIES_MB: ${{ vars.MIN_SERIES_MB || '30' }}
+          DEAD_AFTER_DAYS: ${{ vars.DEAD_AFTER_DAYS || '30' }}
+          DEDUP_OTHER_LANGUAGE_POLICY: ${{ vars.DEDUP_OTHER_LANGUAGE_POLICY || 'delete' }}
+          DEDUP_UNKNOWN_LANGUAGE_AS: ${{ vars.DEDUP_UNKNOWN_LANGUAGE_AS || 'english' }}
+          MAX_DELETE_RATIO: ${{ vars.MAX_DELETE_RATIO || '0.95' }}
+          NORMALIZE_OVERWRITE_TYPE: ${{ vars.NORMALIZE_OVERWRITE_TYPE || 'false' }}
+          NORMALIZE_OVERWRITE_EPISODES: ${{ vars.NORMALIZE_OVERWRITE_EPISODES || 'false' }}
+        run: npm start
