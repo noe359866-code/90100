@@ -36,13 +36,21 @@ export function normalizeQuality(value) {
   if (!value) return null;
   const v = String(value).trim().toLowerCase().replace(/\s+/g, '');
   if (!v) return null;
-  if (/^(?:2160p?|4k|uhd|8k|4320p?|3840x2160)$/.test(v) || /2160|4k|uhd/.test(v)) return '2160p';
-  if (/^(?:1080[pi]?|fhd|fullhd|1920x1080)$/.test(v) || /1080/.test(v)) return '1080p';
-  if (/^(?:720p?|hd|hdready|1280x720)$/.test(v) || /720/.test(v)) return '720p';
-  if (/^(?:576p?|pal)$/.test(v) || /576/.test(v)) return '576p';
-  if (/^(?:480p?|sd|ntsc|dvd)$/.test(v) || /480/.test(v)) return '480p';
-  if (/^(?:360p?)$/.test(v) || /360/.test(v)) return '360p';
+  // Coincidencia exacta primero. El fallback embebido exige límite de dígito:
+  // si no, "1720" se leía como 720p.
+  if (/^(?:2160p?|4k|uhd|8k|4320p?|3840x2160)$/.test(v)) return '2160p';
+  if (/^(?:1080[pi]?|fhd|fullhd|1920x1080)$/.test(v)) return '1080p';
+  if (/^(?:720p?|hd|hdready|1280x720)$/.test(v)) return '720p';
+  if (/^(?:576p?|pal)$/.test(v)) return '576p';
+  if (/^(?:480p?|sd|ntsc|dvd)$/.test(v)) return '480p';
+  if (/^(?:360p?)$/.test(v)) return '360p';
   if (/^(?:cam|ts|tc|telesync|hdcam|hdts)$/.test(v)) return null; // fuentes, no resoluciones
+  if (/(?:^|[^0-9])(?:2160p?|4320p?|3840x2160)(?:[^0-9]|$)|(?:^|[^a-z0-9])(?:4k|uhd|8k)(?:[^a-z0-9]|$)/.test(v)) return '2160p';
+  if (/(?:^|[^0-9])1080[pi]?(?:[^0-9]|$)|(?:^|[^a-z0-9])(?:fhd|fullhd|1920x1080)(?:[^a-z0-9]|$)/.test(v)) return '1080p';
+  if (/(?:^|[^0-9])720p?(?:[^0-9]|$)|(?:^|[^a-z0-9])1280x720(?:[^a-z0-9]|$)/.test(v)) return '720p';
+  if (/(?:^|[^0-9])576p?(?:[^0-9]|$)/.test(v)) return '576p';
+  if (/(?:^|[^0-9])480p?(?:[^0-9]|$)/.test(v)) return '480p';
+  if (/(?:^|[^0-9])360p?(?:[^0-9]|$)/.test(v)) return '360p';
   return null;
 }
 

@@ -85,7 +85,8 @@ function writeGithubSummary(results, dbStats, totalMs) {
   ];
   for (const r of results) {
     const status = r.error ? '❌ error' : '✅ ok';
-    const detail = r.error ? `\`${r.error}\`` : `\`${JSON.stringify(r.result)}\``;
+    const raw = r.error ? r.error : JSON.stringify(r.result);
+    const detail = '`' + String(raw).replace(/[|\n\r`]/g, ' ').slice(0, 500) + '`';
     lines.push(`| ${STEP_RUNNERS[r.step].title} | ${status} | ${fmtMs(r.ms)} | ${detail} |`);
   }
   lines.push('');
@@ -136,10 +137,14 @@ async function main() {
   log.info(`Totales BD: ${JSON.stringify(db.stats)} · duración ${fmtMs(totalMs)}`);
   writeGithubSummary(results, db.stats, totalMs);
 
-  process.exitCode = failed ? 1 : 0;
+  const code = failed ? 1 : 0;
+  process.exitCode = code;
+  // supabase-js / undici pueden dejar sockets abiertos y el job de Actions no termina.
+  setTimeout(() => process.exit(code), 50);
 }
 
 main().catch((err) => {
   log.error(err.stack || err.message);
   process.exitCode = 1;
+  setTimeout(() => process.exit(1), 50);
 });

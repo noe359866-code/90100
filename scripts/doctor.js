@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * DIAGNÓSTICO DE CONFIGURACIÓN (no toca la base de datos)
- * =======================================================
- * Comprueba qué variables de entorno llegan realmente al proceso y valida la
- * credencial de TMDB contra la API. Pensado para responder a la pregunta
+ * DIAGNÓSTICO DE CONFIGURACIÓN (no escribe en la base de datos)
+ * ==============================================================
+ * Comprueba qué variables de entorno llegan realmente al proceso, valida la
+ * credencial de TMDB contra la API y hace un conteo de lectura en Supabase.
+ * Pensado para responder a la pregunta
  * "lo configuré en GitHub Actions pero sigue apareciendo el aviso".
  *
  *   npm run doctor                      # usa el entorno actual / .env

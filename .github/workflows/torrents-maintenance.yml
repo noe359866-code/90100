@@ -65,25 +65,47 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY || vars.TMDB_API_KEY || '' }}
 
           # --- Parámetros de ejecución ---
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || vars.DRY_RUN || 'false' }}
+          # inputs.dry_run es boolean: `false` es falsy en expresiones de Actions y, con
+          # `|| vars.DRY_RUN`, un dry-run desmarcado se ignoraba si la variable era true.
+          # Se convierte a string antes de combinarlo.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && 'true' || 'false') || vars.DRY_RUN || 'false' }}
           STEPS: ${{ github.event_name == 'workflow_dispatch' && inputs.steps || vars.STEPS || 'all' }}
           LOG_LEVEL: ${{ github.event_name == 'workflow_dispatch' && inputs.log_level || vars.LOG_LEVEL || 'info' }}
           ENRICH_MAX_LOOKUPS: ${{ github.event_name == 'workflow_dispatch' && inputs.enrich_max_lookups || vars.ENRICH_MAX_LOOKUPS || '300' }}
+          CONTINUE_ON_ERROR: ${{ vars.CONTINUE_ON_ERROR || 'true' }}
 
           # --- Ajustes opcionales (Repository variables; ver .env.example) ---
           TABLE_NAME: ${{ vars.TABLE_NAME || 'torrents' }}
           CLEAN_TITLE_COLUMN: ${{ vars.CLEAN_TITLE_COLUMN || 'title_text' }}
+          PAGE_SIZE: ${{ vars.PAGE_SIZE || '1000' }}
+          DELETE_CHUNK_SIZE: ${{ vars.DELETE_CHUNK_SIZE || '500' }}
+          UPDATE_CONCURRENCY: ${{ vars.UPDATE_CONCURRENCY || '8' }}
+          MAX_DELETE_RATIO: ${{ vars.MAX_DELETE_RATIO || '0.95' }}
+          ADULT_EXTRA_KEYWORDS: ${{ vars.ADULT_EXTRA_KEYWORDS || '' }}
+          MIN_MOVIE_MB: ${{ vars.MIN_MOVIE_MB || '150' }}
+          MIN_SERIES_MB: ${{ vars.MIN_SERIES_MB || '30' }}
+          SIZE_FILTER_APPLY_TO_ANIME: ${{ vars.SIZE_FILTER_APPLY_TO_ANIME || 'true' }}
+          SIZE_FILTER_INCLUDE_ZERO: ${{ vars.SIZE_FILTER_INCLUDE_ZERO || 'false' }}
+          DEAD_AFTER_DAYS: ${{ vars.DEAD_AFTER_DAYS || '30' }}
+          DEAD_INCLUDE_NULL_SEEDERS: ${{ vars.DEAD_INCLUDE_NULL_SEEDERS || 'false' }}
+          NORMALIZE_OVERWRITE_TYPE: ${{ vars.NORMALIZE_OVERWRITE_TYPE || 'false' }}
+          NORMALIZE_TYPE_CONFIDENCE: ${{ vars.NORMALIZE_TYPE_CONFIDENCE || '0.8' }}
+          NORMALIZE_OVERWRITE_EPISODES: ${{ vars.NORMALIZE_OVERWRITE_EPISODES || 'false' }}
+          NORMALIZE_MERGE_TITLE_LANGUAGES: ${{ vars.NORMALIZE_MERGE_TITLE_LANGUAGES || 'true' }}
+          ENRICH_MIN_SIMILARITY: ${{ vars.ENRICH_MIN_SIMILARITY || '0.6' }}
+          ENRICH_TMDB_FOR_ANIME: ${{ vars.ENRICH_TMDB_FOR_ANIME || 'true' }}
+          ENRICH_CONCURRENCY: ${{ vars.ENRICH_CONCURRENCY || '4' }}
+          ENRICH_TRACK_IDS_COLUMNS: ${{ vars.ENRICH_TRACK_IDS_COLUMNS || 'true' }}
+          ENRICH_RECHECK_AFTER_DAYS: ${{ vars.ENRICH_RECHECK_AFTER_DAYS || '14' }}
+          ENRICH_MAX_ATTEMPTS: ${{ vars.ENRICH_MAX_ATTEMPTS || '3' }}
           # Límites de tasa de las APIs (AniList es el más estricto: ~30 req/min)
           ANILIST_RPM: ${{ vars.ANILIST_RPM || '20' }}
           ANILIST_MIN_RPM: ${{ vars.ANILIST_MIN_RPM || '5' }}
           KITSU_RPM: ${{ vars.KITSU_RPM || '90' }}
           KITSU_MIN_RPM: ${{ vars.KITSU_MIN_RPM || '15' }}
-          MIN_MOVIE_MB: ${{ vars.MIN_MOVIE_MB || '150' }}
-          MIN_SERIES_MB: ${{ vars.MIN_SERIES_MB || '30' }}
-          DEAD_AFTER_DAYS: ${{ vars.DEAD_AFTER_DAYS || '30' }}
+          TMDB_RPS: ${{ vars.TMDB_RPS || '20' }}
           DEDUP_OTHER_LANGUAGE_POLICY: ${{ vars.DEDUP_OTHER_LANGUAGE_POLICY || 'delete' }}
           DEDUP_UNKNOWN_LANGUAGE_AS: ${{ vars.DEDUP_UNKNOWN_LANGUAGE_AS || 'english' }}
-          MAX_DELETE_RATIO: ${{ vars.MAX_DELETE_RATIO || '0.95' }}
-          NORMALIZE_OVERWRITE_TYPE: ${{ vars.NORMALIZE_OVERWRITE_TYPE || 'false' }}
-          NORMALIZE_OVERWRITE_EPISODES: ${{ vars.NORMALIZE_OVERWRITE_EPISODES || 'false' }}
+          DEDUP_FALLBACK_TITLE_KEY: ${{ vars.DEDUP_FALLBACK_TITLE_KEY || 'false' }}
+          DEDUP_SEEDER_WEIGHT: ${{ vars.DEDUP_SEEDER_WEIGHT || '20' }}
         run: npm start

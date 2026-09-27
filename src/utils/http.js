@@ -16,10 +16,17 @@ export class HttpError extends Error {
 }
 
 const isTransientHttp = (err) => {
+  // El interruptor del limitador no se reintenta: reintentar sólo alarga el bloqueo.
+  if (err?.code === 'ERR_RATE_LIMITED') return false;
   if (err instanceof HttpError) return err.status === 429 || err.status >= 500 || err.status === 408;
   // Errores de red / abort (timeout)
   return true;
 };
+
+/** Quita credenciales de una URL antes de loguearla (api_key de TMDB v3, etc.). */
+export function redactUrl(url) {
+  return String(url).replace(/([?&](?:api_key|apikey|token|access_token)=)[^&\s]+/gi, '$1***');
+}
 
 const parseRetryAfter = (headerValue) => {
   if (!headerValue) return undefined;
@@ -42,6 +49,9 @@ const parseRetryAfter = (headerValue) => {
  * @param {(err: HttpError) => void} [options.onThrottle] se llama en cada 429/503, antes de reintentar
  */
 export async function fetchJson(url, { method = 'GET', headers = {}, body, timeoutMs = 15000, retries = 3, onRetry, onThrottle } = {}) {
+  // Un mismo 429 reintentado no debe contar como varios incidentes: si no, los
+  // reintentos de UNA petición disparan el interruptor (4 rechazos seguidos).
+  let reportedThrottle = false;
   return withRetry(
     async () => {
       const controller = new AbortController();
@@ -65,14 +75,17 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
         }
 
         if (!res.ok) {
-          const err = new HttpError(`HTTP ${res.status} ${res.statusText} → ${url}`, {
+          const err = new HttpError(`HTTP ${res.status} ${res.statusText} → ${redactUrl(url)}`, {
             status: res.status,
-            url,
+            url: redactUrl(url),
             body: json ?? text?.slice(0, 300),
             retryAfterMs: parseRetryAfter(res.headers.get('retry-after')),
           });
           // Avisamos al limitador de tasa para que congela el cliente y baje el ritmo
-          if ((res.status === 429 || res.status === 503) && onThrottle) onThrottle(err);
+          if ((res.status === 429 || res.status === 503) && onThrottle && !reportedThrottle) {
+            reportedThrottle = true;
+            onThrottle(err);
+          }
           throw err;
         }
         return json;

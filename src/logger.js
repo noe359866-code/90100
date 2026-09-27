@@ -9,6 +9,9 @@ let currentLevel = LEVELS.info;
 
 const ts = () => new Date().toISOString();
 
+/** Las anotaciones de Actions rompen el comando si hay saltos de línea o `%`. */
+const ghaEscape = (s) => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
 const fmt = (args) =>
   args
     .map((a) => {
@@ -33,13 +36,13 @@ export const log = {
   warn: (...args) => {
     if (currentLevel <= LEVELS.warn) {
       console.warn(`${ts()} [WARN ] ${fmt(args)}`);
-      if (IS_GHA) console.log(`::warning::${fmt(args)}`);
+      if (IS_GHA) console.log(`::warning::${ghaEscape(fmt(args))}`);
     }
   },
   error: (...args) => {
     if (currentLevel <= LEVELS.error) {
       console.error(`${ts()} [ERROR] ${fmt(args)}`);
-      if (IS_GHA) console.log(`::error::${fmt(args)}`);
+      if (IS_GHA) console.log(`::error::${ghaEscape(fmt(args))}`);
     }
   },
   /** Agrupa la salida en GitHub Actions (plegable en la UI). */

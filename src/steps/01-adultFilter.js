@@ -53,6 +53,9 @@ const WHITELIST = [
   'milf (2018)', 'milf 2018', 'milf.2018',
   'threesome (1994)', 'threesome 1994',
   'the whore of babylon', 'whore of babylon', 'slut in a good way',
+  'big ass spider', 'fuck (2010)', 'fuck 2010', 'fuck.2010', 'fuck (2005)', 'fuck 2005', 'fuck.2005',
+  'the fuck-it list', 'fuck-it list', 'el sexo de los ángeles', 'sexo de los ángeles',
+  'sluts: the documentary', 'sluts the documentary',
   'tits (2013)', 'tetas y', 'tetas 2',
   'sexo, pudor y lágrimas', 'sexo pudor y lagrimas', 'sexo fácil', 'sexo facil', 'sexo con amor', 'sexo en nueva york', 'sexo en la ciudad', 'sexo por compasión', 'sexo por compasion', 'sexo, mentiras y', 'sexo mentiras y',
   'la mala educación', 'la mala educacion', 'todo sobre mi madre', 'la piel que habito',
@@ -74,6 +77,26 @@ export function buildAdultRegex(extra = []) {
 const HARD_RE = new RegExp(`(^|[^a-z0-9])(${HARD_KEYWORDS.map(escapeRe).join('|')})([^a-z0-9]|$)`, 'i');
 
 /**
+ * Películas reales cuyo título contiene una palabra dura de estudio.
+ * "Vixen" (1968, Russ Meyer) no es el estudio; "Vixen Angela White" sí.
+ */
+const HARD_EXCEPTIONS = ['vixen 1968', 'russ meyer s vixen', 'russ meyers vixen'];
+
+/** Minúsculas, sin acentos ni separadores: "Big.Ass.Spider!" y "big ass spider" comparan igual. */
+const fold = (s) => String(s ?? '')
+  .toLowerCase()
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
+
+const FOLDED_WHITELIST = WHITELIST.map(fold).filter(Boolean);
+const hasPhrase = (foldedTitle, phrase) => {
+  const p = fold(phrase);
+  return Boolean(p) && ` ${foldedTitle} `.includes(` ${p} `);
+};
+
+/**
  * Decide en cliente si un título es adulto (precisión sobre el candidato del servidor).
  * @param {string} title
  * @param {RegExp} adultRe
@@ -81,9 +104,16 @@ const HARD_RE = new RegExp(`(^|[^a-z0-9])(${HARD_KEYWORDS.map(escapeRe).join('|'
 export function isAdultTitle(title, adultRe) {
   if (!title) return false;
   const t = title.toLowerCase();
+  // Si el llamador pasa una regex global, test() avanza lastIndex y el siguiente título falla.
+  adultRe.lastIndex = 0;
   if (!adultRe.test(t)) return false;
-  if (HARD_RE.test(t)) return true;
-  return !WHITELIST.some((w) => t.includes(w));
+  const folded = fold(title);
+  const hardHits = [...t.matchAll(new RegExp(HARD_RE.source, 'gi'))].map((m) => m[2]);
+  if (hardHits.length) {
+    const knownFilm = hardHits.every((h) => h === 'vixen') && HARD_EXCEPTIONS.some((w) => hasPhrase(folded, w));
+    return !knownFilm;
+  }
+  return !FOLDED_WHITELIST.some((w) => hasPhrase(folded, w));
 }
 
 /**
@@ -93,6 +123,15 @@ export function isAdultTitle(title, adultRe) {
 export async function runAdultFilter(db, config, log) {
   const pattern = buildAdultRegex(config.adult.extraKeywords);
   const adultRe = new RegExp(pattern, 'i');
+
+  const [pending, evaluated] = await Promise.all([
+    db.countWhere((q) => q.filter('title', 'imatch', pattern), 'adult-filter pending'),
+    db.countWhere((q) => q, 'adult-filter evaluated'),
+  ]);
+  if (evaluated > 0 && pending / evaluated > config.maxDeleteRatio) {
+    const pct = ((pending / evaluated) * 100).toFixed(1);
+    throw new Error(`adult-filter: el prefiltro marcaría ${pending} de ${evaluated} filas (${pct}%), por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad.`);
+  }
 
   const deleted = await db.deleteWhere(
     (q) => q.filter('title', 'imatch', pattern),

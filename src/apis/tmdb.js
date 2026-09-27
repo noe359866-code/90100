@@ -4,7 +4,7 @@
  */
 import { fetchJson } from '../utils/http.js';
 import { createRateLimiter } from '../utils/async.js';
-import { bestSimilarity } from '../utils/text.js';
+import { adjustTitleScore, bestSimilarity } from '../utils/text.js';
 
 const BASE = 'https://api.themoviedb.org/3';
 
@@ -93,18 +93,19 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
     const path = kind === 'movie' ? '/search/movie' : '/search/tv';
     const yearParam = kind === 'movie' ? 'primary_release_year' : 'first_air_date_year';
 
-    // Con año: primero búsqueda acotada; si no hay resultados, sin año.
+    // Primero todas las variantes CON año (la más específica antes). Si no, sin año.
+    // Antes se intercalaba la búsqueda libre de la variante 1 y podía aceptar un
+    // homónimo antes de probar "Título 2nd Season" acotado por año.
     const attempts = [];
-    for (const v of variants) {
-      if (year) attempts.push({ query: v, year });
-      attempts.push({ query: v, year: null });
-    }
+    if (year) for (const v of variants) attempts.push({ query: v, year });
+    for (const v of variants) attempts.push({ query: v, year: null });
 
     for (const attempt of attempts) {
       let json;
       try {
         json = await get(path, { query: attempt.query, include_adult: 'false', [yearParam]: attempt.year ?? undefined });
       } catch (err) {
+        if (err?.code === 'ERR_RATE_LIMITED') throw err;
         log?.warn(`TMDB: fallo buscando "${attempt.query}": ${err.message}`);
         continue;
       }
@@ -114,12 +115,10 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
         const dateStr = kind === 'movie' ? r.release_date : r.first_air_date;
         const rYear = dateStr ? Number(dateStr.slice(0, 4)) : null;
         let score = bestSimilarity(attempt.query, titles);
-        if (year && rYear) {
-          if (Math.abs(rYear - year) <= 1) score += 0.1;
-          else if (Math.abs(rYear - year) > 2) score -= 0.2;
-        }
-        // Ligero bonus por popularidad para desempatar remakes/homónimos
         score += Math.min(0.05, (r.popularity || 0) / 2000);
+        score = adjustTitleScore(score, attempt.query, titles, {
+          year, itemYear: rYear, yearWindow: 2, yearPenalty: 0.2, yearBonus: 0.1,
+        });
         if (!best || score > best.score) best = { r, score, title: titles[0], year: rYear };
       }
       if (best && best.score >= minSimilarity) {
@@ -135,6 +134,7 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
       const json = await get(`/${kind === 'movie' ? 'movie' : 'tv'}/${tmdbId}/external_ids`);
       return { imdb_id: json?.imdb_id || null, tvdb_id: json?.tvdb_id || null };
     } catch (err) {
+      if (err?.code === 'ERR_RATE_LIMITED') throw err;
       log?.warn(`TMDB: fallo en external_ids ${kind}/${tmdbId}: ${err.message}`);
       return { imdb_id: null, tvdb_id: null };
     }

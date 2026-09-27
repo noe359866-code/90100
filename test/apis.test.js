@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmdbKeyKind, validateTmdbKey, createTmdbClient } from '../src/apis/tmdb.js';
+import { redactUrl } from '../src/utils/http.js';
+import { adjustTitleScore } from '../src/utils/text.js';
 
 test('tmdbKeyKind: distingue API key v3, token v4 y vacío', () => {
   assert.equal(tmdbKeyKind(undefined), null);
@@ -72,6 +74,17 @@ test('validateTmdbKey: token v4 se envía como Bearer', async () => {
   assert.equal(res.ok, true);
   assert.equal(calls[0][1].Authorization, 'Bearer eyJhbGciOiJIUzI1NiJ9.token');
   assert.doesNotMatch(calls[0][0], /api_key=/);
+});
+
+test('redactUrl: no deja la api_key en los mensajes de error', () => {
+  assert.equal(redactUrl('https://api.themoviedb.org/3/search/movie?api_key=secret123&query=dune'), 'https://api.themoviedb.org/3/search/movie?api_key=***&query=dune');
+});
+
+test('adjustTitleScore: una temporada explícita no casa con la temporada anterior', () => {
+  const weak = adjustTitleScore(0.71, 'Jujutsu Kaisen 2nd Season', ['Jujutsu Kaisen'], { year: 2023, itemYear: 2020 });
+  assert.ok(weak < 0.6, `score ${weak} debería quedar por debajo del umbral`);
+  const strong = adjustTitleScore(0.4, 'Frieren', ["Frieren: Beyond Journey's End"]);
+  assert.ok(strong >= 0.75, `el prefijo largo debería subir el score (${strong})`);
 });
 
 test('config: recorta espacios y saltos de línea en las credenciales', async () => {

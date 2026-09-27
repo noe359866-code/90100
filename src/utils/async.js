@@ -18,8 +18,9 @@ export function chunk(array, size) {
  */
 export async function mapWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
+  if (!items.length) return results;
   let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+  const workers = Array.from({ length: Math.max(1, Math.min(limit || 1, items.length)) }, async () => {
     while (true) {
       const i = next++;
       if (i >= items.length) return;

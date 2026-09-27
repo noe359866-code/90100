@@ -54,6 +54,7 @@ export function workIdentifiers(row, parsed) {
   if (!isMissing(row.tmdb_id)) ids.push(`tmdb:${tmdbKind}:${row.tmdb_id}`);
   if (!isMissing(row.anilist_id)) ids.push(`anilist:${row.anilist_id}`);
   if (!isMissing(row.kitsu_id)) ids.push(`kitsu:${row.kitsu_id}`);
+  if (!isMissing(row.mal_id)) ids.push(`mal:${row.mal_id}`);
   return ids;
 }
 
@@ -72,13 +73,22 @@ export function episodeKey(row, parsed) {
 
   if (type === 'movie' && episode === null && season === null) return 'movie';
   if (episode !== null) {
+    // Un pack S01E01-E10 no es el episodio 1: si compartieran clave, el pack
+    // borraría el episodio suelto (o al revés) y se perderían el resto de capítulos.
+    const end = parsed.episodeEnd;
+    const range = end != null && end !== episode ? `-e${end}` : '';
     // En anime, "sin temporada" y "temporada 1" se refieren normalmente al mismo episodio.
-    if (type === 'anime' && (season === null || season === 1)) return `e${episode}`;
-    if (season !== null) return `s${season}e${episode}`;
-    return `e${episode}`;
+    if (type === 'anime' && (season === null || season === 1)) return `e${episode}${range}`;
+    if (season !== null) return `s${season}e${episode}${range}`;
+    return `e${episode}${range}`;
   }
   if (absolute !== null) return `e${absolute}`;
-  if (season !== null) return `s${season}pack`;
+  if (season !== null) {
+    // S01-S03 no es el pack de la temporada 1: si compartieran clave, uno borraría al otro.
+    const end = parsed.seasonEnd;
+    const range = end != null && end !== season ? `-s${end}` : '';
+    return `s${season}${range}pack`;
+  }
   return parsed.isComplete ? 'complete' : 'full';
 }
 
@@ -168,12 +178,19 @@ export function selectSurvivors(candidates, dedupeConfig) {
   if (english.length) keep.add(english[0].row.id);
   for (const c of untouched) keep.add(c.row.id);
 
+  // Dos copias en francés (u otro idioma) no deben borrarse mutuamente: si no queda
+  // ningún superviviente es/en, se conserva el mejor en vez de vaciar la obra.
+  if (!keep.size && candidates.length) {
+    const best = [...candidates].sort(compareCandidates)[0];
+    keep.add(best.row.id);
+  }
+
   const remove = candidates.filter((c) => !keep.has(c.row.id)).map((c) => c.row.id);
   return { keep, remove };
 }
 
 export async function runDeduplicator(db, config, log) {
-  const select = 'id,imdb_id,tmdb_id,anilist_id,kitsu_id,type,season,episode,absolute_episode,seeders,size_bytes,codec,quality,audio,subtitles,title,updated_at';
+  const select = 'id,imdb_id,tmdb_id,anilist_id,kitsu_id,mal_id,type,season,episode,absolute_episode,seeders,size_bytes,codec,quality,audio,subtitles,title,updated_at';
   const uf = new UnionFind();
   /** filas compactas: [{ id, ids[], epKey, score, lang, row }] */
   const entries = [];
@@ -182,7 +199,7 @@ export async function runDeduplicator(db, config, log) {
 
   const applyFilters = (q) => (config.dedupe.fallbackTitleKey
     ? q
-    : q.or('imdb_id.not.is.null,tmdb_id.not.is.null,anilist_id.not.is.null,kitsu_id.not.is.null'));
+    : q.or('imdb_id.not.is.null,tmdb_id.not.is.null,anilist_id.not.is.null,kitsu_id.not.is.null,mal_id.not.is.null'));
 
   for await (const page of db.iterateRows({ select, applyFilters })) {
     for (const row of page) {

@@ -32,5 +32,9 @@ create index concurrently if not exists torrents_tmdb_ep_idx
   on public.torrents (tmdb_id, season, episode) where tmdb_id is not null;
 create index concurrently if not exists torrents_anilist_ep_idx
   on public.torrents (anilist_id, season, episode) where anilist_id is not null;
+create index concurrently if not exists torrents_kitsu_ep_idx
+  on public.torrents (kitsu_id, season, episode) where kitsu_id is not null;
+create index concurrently if not exists torrents_mal_ep_idx
+  on public.torrents (mal_id, season, episode) where mal_id is not null;
 
 -- Paginación keyset: la PK sobre id ya cubre `order by id` + `id > $1`.

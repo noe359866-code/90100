@@ -6,6 +6,7 @@ import { missingIdsFor } from '../src/steps/05-enricher.js';
 import { scoreTorrent, selectSurvivors, episodeKey, workIdentifiers } from '../src/steps/06-deduplicator.js';
 import { parseTitle } from '../src/parser/titleParser.js';
 import { classifyLanguage, normalizeLanguageArray } from '../src/parser/languages.js';
+import { normalizeQuality } from '../src/parser/normalizers.js';
 
 // ---------------------------------------------------------------------------
 // Paso 1 — filtro adulto
@@ -19,13 +20,15 @@ test('adult: detecta contenido explícito', () => {
 });
 
 test('adult: respeta títulos legítimos', () => {
-  for (const t of ['Saving Private Ryan 1998', 'xXx: Return of Xander Cage (2017) 1080p', 'Sex Education S01E01', 'Analyze This 1999', 'The Naked Director S01', 'Hardcore Henry 2015', 'Sexo, pudor y lágrimas 1999', 'Canal Street', 'Dune 2021', 'Pussy Riot: A Punk Prayer']) {
+  for (const t of ['Saving Private Ryan 1998', 'xXx: Return of Xander Cage (2017) 1080p', 'xXx.Return.of.Xander.Cage.2017.1080p', 'Sex Education S01E01', 'Sex.Education.S01E01.1080p', 'Analyze This 1999', 'The Naked Director S01', 'Hardcore Henry 2015', 'Hardcore.Henry.2015.1080p', 'Sexo, pudor y lágrimas 1999', 'Sexo.pudor.y.lagrimas.1999.1080p', 'Canal Street', 'Dune 2021', 'Pussy Riot: A Punk Prayer', 'Pussy.Riot.A.Punk.Prayer.2013.1080p', 'Big Ass Spider! (2013) 1080p', 'Big.Ass.Spider.2013.1080p', 'Fuck (2010) 1080p', 'Fuck.2010.1080p', 'The Fuck-It List (2020) 1080p', 'El sexo de los ángeles (2012)', 'Vixen (1968) 1080p', 'Vixen.1968.1080p.BluRay']) {
     assert.equal(isAdultTitle(t, adultRe), false, t);
   }
 });
 
 test('adult: la lista blanca no salva palabras duras', () => {
   assert.equal(isAdultTitle('Sex Education XXX Parody Brazzers', adultRe), true);
+  assert.equal(isAdultTitle('Vixen Angela White 1080p', adultRe), true);
+  assert.equal(isAdultTitle('Vixen 1968 Brazzers', adultRe), true);
 });
 
 test('adult: palabras extra por configuración', () => {
@@ -67,6 +70,19 @@ test('normalizer: no sobrescribe type/episodios salvo configuración', () => {
   const patch2 = buildNormalizationPatch(row, { ...cfg, normalize: { ...cfg.normalize, overwriteType: true, overwriteEpisodes: true } });
   assert.equal(patch2.type, 'anime');
   assert.equal(patch2.episode, 9);
+});
+
+test('normalizer: HD vago no tapa la resolución del título', () => {
+  const row = { id: 1, title: 'Movie Name 2024 1080p BluRay', title_text: 'Movie Name', type: 'movie', season: null, episode: null, absolute_episode: null, codec: null, quality: 'HD', audio: [], subtitles: [] };
+  const patch = buildNormalizationPatch(row, cfg);
+  assert.equal(patch.quality, '1080p');
+});
+
+test('normalizeQuality: no confunde 1720 con 720p', () => {
+  assert.equal(normalizeQuality('1720'), null);
+  assert.equal(normalizeQuality('720'), '720p');
+  assert.equal(normalizeQuality('WEB-DL 1080p'), '1080p');
+  assert.equal(normalizeQuality('HD'), '720p');
 });
 
 test('normalizer: fusiona idiomas del título con los de la BD', () => {
@@ -148,6 +164,16 @@ test('dedupe: sin idioma se trata como english (configurable) y otros idiomas se
   assert.deepEqual(b.remove, []);
 });
 
+test('dedupe: no vacía un grupo que sólo tiene otros idiomas', () => {
+  const candidates = [
+    mk(1, 'Movie 2023 1080p', { audio: ['fr'], subtitles: ['fr'], seeders: 10 }),
+    mk(2, 'Movie 2023 720p', { audio: ['fr'], subtitles: ['fr'], seeders: 40 }),
+  ];
+  const { keep, remove } = selectSurvivors(candidates, dedupeCfg);
+  assert.deepEqual([...keep], [2]);
+  assert.deepEqual(remove, [1]);
+});
+
 test('dedupe: episodeKey y workIdentifiers', () => {
   const p = parseTitle('Show S02E09 1080p');
   assert.equal(episodeKey({ type: 'series', season: 2, episode: 9 }, p), 's2e9');
@@ -157,6 +183,9 @@ test('dedupe: episodeKey y workIdentifiers', () => {
   assert.equal(episodeKey({ type: 'anime', season: 1, episode: 9 }, pa), 'e9');
   assert.equal(episodeKey({ type: 'anime', season: null, episode: null }, pa), 'e9', 'usa el parser si la BD está vacía');
   assert.equal(episodeKey({ type: 'series', season: 1, episode: null }, parseTitle('Show S01 COMPLETE')), 's1pack');
+  assert.equal(episodeKey({ type: 'series', season: 1, episode: null }, parseTitle('Show.Name.S01-S03.1080p')), 's1-s3pack');
+  assert.equal(episodeKey({ type: 'series', season: 1, episode: 1 }, parseTitle('Show Name S01E01-E10 720p')), 's1e1-e10');
+  assert.equal(episodeKey({ type: 'series', season: 1, episode: 1 }, parseTitle('Show Name S01E01 720p')), 's1e1');
   assert.deepEqual(workIdentifiers({ type: 'movie', imdb_id: 'TT123', tmdb_id: 5, anilist_id: null, kitsu_id: null }, p), ['imdb:tt123', 'tmdb:movie:5']);
   assert.deepEqual(workIdentifiers({ type: 'series', tmdb_id: 5 }, p), ['tmdb:tv:5']);
 });

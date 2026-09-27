@@ -4,7 +4,7 @@
  */
 import { fetchJson } from '../utils/http.js';
 import { createRateLimiter } from '../utils/async.js';
-import { bestSimilarity } from '../utils/text.js';
+import { adjustTitleScore, bestSimilarity } from '../utils/text.js';
 
 const ENDPOINT = 'https://graphql.anilist.co';
 
@@ -57,8 +57,20 @@ export function createAniListClient({
       }),
     ).then(
       (json) => {
+        const media = json?.data?.Page?.media;
+        if (!Array.isArray(media)) {
+          const message = json?.errors?.map((e) => e.message).filter(Boolean).join('; ') || 'respuesta sin resultados';
+          const err = new Error(`AniList: ${message}`);
+          // A veces el rate limit llega como HTTP 200 + errors, no como 429.
+          if (/too many requests|rate limit/i.test(message)) {
+            err.code = 'ERR_RATE_LIMITED';
+            err.retryAfterMs = 60_000;
+            limiter.reportThrottle?.(err.retryAfterMs);
+          }
+          throw err;
+        }
         limiter.reportSuccess?.();
-        return (json?.data?.Page?.media || []).filter((m) => m.format !== 'MUSIC');
+        return media.filter((m) => m.format !== 'MUSIC');
       },
       // Un fallo NO se cachea: si no, el siguiente título igual fallaría sin reintentar.
       (err) => {
@@ -93,11 +105,9 @@ export function createAniListClient({
       let best = null;
       for (const m of media) {
         const titles = [m.title?.romaji, m.title?.english, m.title?.native, m.title?.userPreferred, ...(m.synonyms || [])];
-        let score = bestSimilarity(variant, titles);
-        if (year && m.seasonYear) {
-          if (Math.abs(m.seasonYear - year) <= 1) score += 0.1;
-          else if (Math.abs(m.seasonYear - year) > 3) score -= 0.15;
-        }
+        const score = adjustTitleScore(bestSimilarity(variant, titles), variant, titles, {
+          year, itemYear: m.seasonYear, yearWindow: 3, yearPenalty: 0.15, yearBonus: 0.1,
+        });
         if (!best || score > best.score) best = { m, score };
       }
       if (best && best.score >= minSimilarity) {

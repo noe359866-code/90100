@@ -45,6 +45,8 @@ Sólo se escriben en la BD las filas que realmente cambian. `DRY_RUN=true` ejecu
 
 Los parámetros no sensibles pueden definirse como **Repository variables** (`vars.*`) o pasarse
 como inputs al lanzar el workflow manualmente (`workflow_dispatch`: `dry_run`, `steps`, `log_level`, `enrich_max_lookups`).
+El workflow reenvía las variables de [`.env.example`](.env.example); un `dry_run: false` del
+dispatch no lo pisa una variable `DRY_RUN=true`.
 
 #### "Puse la TMDB_API_KEY y sigue apareciendo el aviso"
 
@@ -151,8 +153,7 @@ Usa `concurrency` para evitar solapes y publica un resumen en la pestaña del jo
 
 ```bash
 npm ci
-cp .env.example .env   # rellena credenciales
-set -a && source .env && set +a
+cp .env.example .env   # rellena credenciales; el script carga `.env` solo (sin pisar el entorno)
 npm run dry-run                       # simula
 STEPS=normalize,dedupe npm start      # ejecuta sólo esos pasos
 npm run parse -- "[SubsPlease] Sousou no Frieren - 09 (1080p) [ABCDEF12].mkv"   # depurar el parser
@@ -214,6 +215,9 @@ audio o subtítulos en inglés. Un torrent dual puede ganar ambos grupos (se con
 Los torrents sin información de idioma se asignan al grupo `DEDUP_UNKNOWN_LANGUAGE_AS` (por defecto
 `english`, que es lo habitual en releases sin etiquetar). Los que tienen audio y subtítulos
 explícitos en otros idiomas se eliminan (`DEDUP_OTHER_LANGUAGE_POLICY=delete`) o se conservan.
+Si en un grupo no queda ningún superviviente español/inglés, se conserva el mejor de todos modos:
+dos copias en francés no se borran mutuamente (una sola copia tampoco se toca). Un pack
+`S01E01-E10` no comparte clave con el episodio 1 suelto.
 
 ## Supuestos sobre el esquema
 
