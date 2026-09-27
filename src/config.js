@@ -24,6 +24,12 @@ const toFloat = (value, fallback) => {
 
 const MB = 1024 * 1024;
 
+/**
+ * Normaliza un valor de entorno: los secrets se pegan a menudo con espacios o
+ * un salto de línea final, y eso rompe URLs y API keys sin ningún error obvio.
+ */
+const clean = (value) => String(value ?? '').trim();
+
 /** Orden canónico de ejecución de los pasos. */
 export const ALL_STEPS = [
   'adult',
@@ -47,8 +53,8 @@ const parseSteps = (raw) => {
 
 export const config = Object.freeze({
   // --- Supabase -----------------------------------------------------------
-  supabaseUrl: env.SUPABASE_URL || '',
-  supabaseKey: env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY || '',
+  supabaseUrl: clean(env.SUPABASE_URL),
+  supabaseKey: clean(env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY),
   table: env.TABLE_NAME || 'torrents',
   /** Columna donde se guarda el título limpio generado por el parser. */
   cleanTitleColumn: env.CLEAN_TITLE_COLUMN || 'title_text',
@@ -101,7 +107,7 @@ export const config = Object.freeze({
 
   // --- Paso 6: enriquecimiento --------------------------------------------
   enrich: {
-    tmdbApiKey: env.TMDB_API_KEY || '',
+    tmdbApiKey: clean(env.TMDB_API_KEY),
     /** Máximo de obras distintas a resolver por ejecución (controla tiempo/rate-limits). */
     maxLookups: toInt(env.ENRICH_MAX_LOOKUPS, 300),
     /** Similitud mínima título↔resultado para aceptar un match (0-1). */
@@ -109,9 +115,23 @@ export const config = Object.freeze({
     /** Buscar también anime en TMDB (para obtener tmdb_id/imdb_id útiles en Stremio). */
     tmdbForAnime: toBool(env.ENRICH_TMDB_FOR_ANIME, true),
     concurrency: Math.max(toInt(env.ENRICH_CONCURRENCY, 4), 1),
-    anilistPerMinute: toInt(env.ANILIST_RPM, 28), // AniList opera degradado a 30 req/min
-    kitsuPerMinute: toInt(env.KITSU_RPM, 90),
-    tmdbPerSecond: toInt(env.TMDB_RPS, 20),
+    anilistPerMinute: Math.max(toInt(env.ANILIST_RPM, 20), 1), // AniList: 30 req/min reales; 20 deja margen
+    /** Tasa mínima a la que se degrada AniList cuando devuelve 429 (penalty box). */
+    anilistMinPerMinute: Math.max(toInt(env.ANILIST_MIN_RPM, 5), 1),
+    kitsuPerMinute: Math.max(toInt(env.KITSU_RPM, 90), 1),
+    /** Tasa mínima a la que se degrada Kitsu cuando devuelve 429. */
+    kitsuMinPerMinute: Math.max(toInt(env.KITSU_MIN_RPM, 15), 1),
+    tmdbPerSecond: Math.max(toInt(env.TMDB_RPS, 20), 1),
+
+    // --- Telemetría de resolución (columnas opcionales de la tabla) ------------
+    // Si la tabla tiene ids_checked_at / ids_source / ids_confidence / ids_attempts
+    // se registra cada consulta: así no se reintentan a diario las mismas obras
+    // imposibles (que es lo que quema la cuota de AniList/TMDB).
+    trackIdsColumns: toBool(env.ENRICH_TRACK_IDS_COLUMNS, true),
+    /** Días antes de volver a consultar una obra que no se pudo resolver. */
+    recheckAfterDays: Math.max(toInt(env.ENRICH_RECHECK_AFTER_DAYS, 14), 0),
+    /** Intentos máximos por obra (0 = ilimitado). */
+    maxAttempts: Math.max(toInt(env.ENRICH_MAX_ATTEMPTS, 3), 0),
   },
 
   // --- Paso 7: deduplicación ----------------------------------------------

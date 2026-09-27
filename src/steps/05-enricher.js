@@ -22,7 +22,34 @@ import { mapWithConcurrency } from '../utils/async.js';
 
 const ID_FIELDS = ['imdb_id', 'tmdb_id', 'anilist_id', 'kitsu_id', 'mal_id'];
 
+/**
+ * `imdb_id` suele llevar un CHECK `^tt[0-9]+$` en la tabla: si TMDB devuelve algo
+ * raro ('', 'nm123', null...) el UPDATE entero fallaria con el error 23514.
+ */
+const IMDB_RE = /^tt\d+$/;
+const cleanImdbId = (value) => {
+  const v = typeof value === 'string' ? value.trim() : '';
+  return IMDB_RE.test(v) ? v : null;
+};
+
+/** Columnas de telemetría de resolución (opcionales; ver sql/004_ids_telemetry.sql). */
+export const ID_TELEMETRY_FIELDS = ['ids_checked_at', 'ids_source', 'ids_confidence', 'ids_attempts'];
+
 const isMissing = (v) => v === null || v === undefined || v === '' || v === 0;
+
+/**
+ * ¿Tiene la tabla las columnas de telemetría? Si no, el enriquecimiento funciona
+ * igual pero sin control de reintentos (se vuelven a consultar todas las obras).
+ */
+async function detectIdTelemetry(db, table) {
+  try {
+    const { error } = await db.supabase.from(table).select('ids_checked_at,ids_attempts').limit(1);
+    if (error) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Decide qué IDs le faltan a una fila según su tipo y la configuración. */
 export function missingIdsFor(type, row, { hasTmdb, tmdbForAnime }) {
@@ -44,10 +71,18 @@ export function missingIdsFor(type, row, { hasTmdb, tmdbForAnime }) {
 
 /**
  * Resuelve los IDs de una obra consultando las APIs necesarias.
- * @returns {Promise<object>} IDs encontrados (sólo los nuevos)
+ * @returns {Promise<{ ids:object, source:string, confidence:number|null }>}
+ *   `ids` sólo contiene los IDs nuevos; `source` es la lista de APIs que han
+ *   resuelto algo ('anilist+kitsu+tmdb') y `confidence` la mejor similitud obtenida.
  */
 export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) {
   const found = {};
+  const sources = [];
+  let confidence = null;
+  const credit = (api, score = null) => {
+    if (!sources.includes(api)) sources.push(api);
+    if (typeof score === 'number' && Number.isFinite(score)) confidence = Math.max(confidence ?? 0, score);
+  };
   const known = { ...group.known };
   const need = (f) => group.needed.has(f) && isMissing(known[f]) && isMissing(found[f]);
   const minSimilarity = config.enrich.minSimilarity;
@@ -57,12 +92,16 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   if (group.type === 'anime') {
     // --- AniList ---
     let englishTitle = null;
-    if (need('anilist_id') || need('mal_id')) {
+    // Si AniList nos ha cerrado el grifo por rate limit, no insistimos: esa obra
+    // se queda sin resolver y se reintentará en la próxima ejecución.
+    const anilistBlocked = anilist?.stats?.().disabled === true;
+    if (!anilistBlocked && (need('anilist_id') || need('mal_id'))) {
       const hit = await anilist.findBest(variants, { year, minSimilarity });
       if (hit) {
         if (need('anilist_id')) found.anilist_id = hit.anilist_id;
         if (need('mal_id') && hit.mal_id) found.mal_id = hit.mal_id;
         englishTitle = hit.englishTitle;
+        credit('anilist', hit.score);
         log.debug(`AniList ✓ "${group.label}" → ${hit.anilist_id} (${hit.title}, score ${hit.score.toFixed(2)})`);
       } else {
         log.debug(`AniList ✗ "${group.label}"`);
@@ -78,7 +117,10 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
         const hit = await kitsu.findBest(englishTitle ? [...variants, englishTitle] : variants, { year, minSimilarity });
         kitsuId = hit?.kitsu_id ?? null;
       }
-      if (kitsuId) found.kitsu_id = kitsuId;
+      if (kitsuId) {
+        found.kitsu_id = kitsuId;
+        credit('kitsu');
+      }
       log.debug(`Kitsu ${kitsuId ? '✓ ' + kitsuId : '✗'} "${group.label}"`);
     }
     // --- TMDB (opcional para anime) ---
@@ -94,12 +136,14 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
         if (hit) {
           tmdbId = hit.tmdb_id;
           kind = hit.kind;
+          credit('tmdb', hit.score);
           if (need('tmdb_id')) found.tmdb_id = tmdbId;
         }
       }
       if (tmdbId && need('imdb_id')) {
         const ext = await tmdb.externalIds(kind, tmdbId);
-        if (ext.imdb_id) found.imdb_id = ext.imdb_id;
+        const extImdb = cleanImdbId(ext.imdb_id);
+        if (extImdb) found.imdb_id = extImdb;
       }
     }
   } else if (tmdb) {
@@ -110,6 +154,7 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
       if (hit) {
         tmdbId = hit.tmdb_id;
         found.tmdb_id = tmdbId;
+        credit('tmdb', hit.score);
         log.debug(`TMDB ✓ "${group.label}" → ${kind}/${tmdbId} (${hit.title} ${hit.year ?? ''}, score ${hit.score.toFixed(2)})`);
       } else {
         log.debug(`TMDB ✗ "${group.label}"`);
@@ -117,10 +162,11 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
     }
     if (tmdbId && need('imdb_id')) {
       const ext = await tmdb.externalIds(kind, tmdbId);
-      if (ext.imdb_id) found.imdb_id = ext.imdb_id;
+      const extImdb = cleanImdbId(ext.imdb_id);
+      if (extImdb) found.imdb_id = extImdb;
     }
   }
-  return found;
+  return { ids: found, source: sources.join('+'), confidence };
 }
 
 /**
@@ -129,14 +175,42 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
 export async function runEnricher(db, config, log, deps = {}) {
   const hasTmdb = Boolean(config.enrich.tmdbApiKey) || Boolean(deps.tmdb);
   const tmdbForAnime = config.enrich.tmdbForAnime;
-  if (!hasTmdb) log.warn('TMDB_API_KEY no configurada: sólo se enriquecerán animes (AniList/Kitsu).');
+  if (!hasTmdb) {
+    log.warn('TMDB_API_KEY no configurada: sólo se enriquecerán animes (AniList/Kitsu).');
+    log.warn('Si la definiste en GitHub: revisa que el secret se llame exactamente TMDB_API_KEY, esté en la pestaña Secrets (no en Variables ni en un Environment sin declarar en el job) y relanza el workflow.');
+  }
 
-  const anilist = deps.anilist || createAniListClient({ requestsPerMinute: config.enrich.anilistPerMinute, log });
-  const kitsu = deps.kitsu || createKitsuClient({ requestsPerMinute: config.enrich.kitsuPerMinute, log });
+  const anilist = deps.anilist || createAniListClient({
+    requestsPerMinute: config.enrich.anilistPerMinute,
+    minRequestsPerMinute: config.enrich.anilistMinPerMinute,
+    log,
+  });
+  const kitsu = deps.kitsu || createKitsuClient({
+    requestsPerMinute: config.enrich.kitsuPerMinute,
+    minRequestsPerMinute: config.enrich.kitsuMinPerMinute,
+    log,
+  });
   const tmdb = deps.tmdb || createTmdbClient({ apiKey: config.enrich.tmdbApiKey, requestsPerSecond: config.enrich.tmdbPerSecond, log });
 
   const cleanCol = config.cleanTitleColumn;
-  const select = ['id', 'title', cleanCol, 'type', 'season', 'episode', ...ID_FIELDS].filter((c, i, a) => a.indexOf(c) === i).join(',');
+  const trackIds = config.enrich.trackIdsColumns && (await detectIdTelemetry(db, config.table));
+  if (config.enrich.trackIdsColumns && !trackIds) {
+    log.info('enricher: la tabla no tiene ids_checked_at/ids_attempts → se revisarán todas las obras huérfanas cada ejecución (ver sql/004_ids_telemetry.sql).');
+  }
+  const select = ['id', 'title', cleanCol, 'type', 'season', 'episode', ...ID_FIELDS, ...(trackIds ? ['ids_attempts'] : [])]
+    .filter((c, i, a) => a.indexOf(c) === i)
+    .join(',');
+
+  // Obras ya consultadas hace poco o con demasiados intentos: se saltan.
+  // Fecha en formato YYYY-MM-DD: evita los puntos de un timestamp dentro de or().
+  const recheckDays = Number.isFinite(config.enrich.recheckAfterDays) ? config.enrich.recheckAfterDays : 14;
+  const maxAttempts = Number.isFinite(config.enrich.maxAttempts) ? config.enrich.maxAttempts : 3;
+  const recheckCutoff = new Date(Date.now() - recheckDays * 86_400_000).toISOString().slice(0, 10);
+  const recheckFilter = (q) => {
+    let out = q.or(`ids_checked_at.is.null,ids_checked_at.lt.${recheckCutoff}`);
+    if (maxAttempts > 0) out = out.or(`ids_attempts.is.null,ids_attempts.lt.${maxAttempts}`);
+    return out;
+  };
 
   // --- 1. Recolectar candidatos por tipo ---------------------------------------
   const queries = [
@@ -149,6 +223,13 @@ export async function runEnricher(db, config, log, deps = {}) {
     queries.push({ label: 'movie/series', filters: (q) => q.in('type', ['movie', 'series']).or('tmdb_id.is.null,imdb_id.is.null') });
   }
   queries.push({ label: 'sin tipo', filters: (q) => q.is('type', null).or('tmdb_id.is.null,anilist_id.is.null,kitsu_id.is.null') });
+
+  if (trackIds) {
+    for (const query of queries) {
+      const inner = query.filters;
+      query.filters = (q) => recheckFilter(inner(q));
+    }
+  }
 
   /** @type {Map<string, object>} */
   const groups = new Map();
@@ -181,6 +262,7 @@ export async function runEnricher(db, config, log, deps = {}) {
           groups.set(key, g);
         }
         g.rows.push({ id: row.id, needed });
+        if (trackIds) g.attempts = Math.max(g.attempts ?? 0, Number(row.ids_attempts) || 0);
         for (const f of needed) g.needed.add(f);
         for (const f of ID_FIELDS) if (!isMissing(row[f]) && isMissing(g.known[f])) g.known[f] = row[f];
         if (parsed.episode !== null || parsed.season !== null) g.hasEpisode = true;
@@ -192,6 +274,8 @@ export async function runEnricher(db, config, log, deps = {}) {
 
   // --- 2. Propagación interna + selección de obras a consultar -------------------
   const updates = [];
+  /** Telemetría aparte: así se detecta si la RPC está obsoleta y la ignora. */
+  const telemetryUpdates = [];
   const applyToRows = (g, ids) => {
     for (const r of g.rows) {
       const patch = {};
@@ -219,29 +303,78 @@ export async function runEnricher(db, config, log, deps = {}) {
   }
 
   // --- 3. Consultas a APIs ---------------------------------------------------------
+  const checkedAt = new Date().toISOString();
+  /** Telemetría: cuándo se ha mirado esta obra, con qué API y con qué confianza. */
+  const telemetryPatch = (g, { source, confidence }) => ({
+    ids_checked_at: checkedAt,
+    ids_attempts: (g.attempts ?? 0) + 1,
+    ids_source: source || 'none',
+    ids_confidence: typeof confidence === 'number' && Number.isFinite(confidence) ? Math.round(confidence * 1000) / 1000 : null,
+  });
+
   let resolved = 0;
   let unresolved = 0;
   let failures = 0;
+  let rateLimited = 0;
+  let rateLimitWarned = false;
   await mapWithConcurrency(selected, config.enrich.concurrency, async (g) => {
+    // ¿Alguna API está en pausa por rate limit? Entonces muchas obras se quedarán
+    // sin resolver sin que sea un fallo del script.
+    const blocked = [anilist, kitsu, tmdb].some((c) => c?.stats?.().disabled);
     try {
-      const found = await resolveWork(g, { anilist, kitsu, tmdb, config, log });
+      const { ids: found, source, confidence } = await resolveWork(g, { anilist, kitsu, tmdb, config, log });
       const ids = { ...g.known, ...found };
+      // Telemetría sólo si la tabla tiene las columnas (y no en DRY_RUN, donde no se escribe nada)
+      if (trackIds && !config.dryRun) {
+        const meta = telemetryPatch(g, { source, confidence });
+        for (const r of g.rows) telemetryUpdates.push({ id: r.id, patch: { ...meta } });
+      }
       if (Object.keys(found).length) {
         resolved += 1;
         applyToRows(g, ids);
+      } else if (blocked) {
+        rateLimited += 1;
+        if (!rateLimitWarned) {
+          rateLimitWarned = true;
+          log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
+        }
       } else {
         unresolved += 1;
         if (g.known && Object.values(g.known).some((v) => !isMissing(v))) applyToRows(g, ids);
       }
     } catch (err) {
       failures += 1;
-      log.warn(`enricher: error resolviendo "${g.label}": ${err.message}`);
+      if (err?.code === 'ERR_RATE_LIMITED') {
+        rateLimited += 1;
+        if (!rateLimitWarned) {
+          rateLimitWarned = true;
+          log.warn('enricher: una API está en pausa por rate limit; las obras afectadas quedan para la próxima ejecución.');
+        }
+      } else {
+        log.warn(`enricher: error resolviendo "${g.label}": ${err.message}`);
+      }
     }
   });
 
   // --- 4. Persistencia ----------------------------------------------------------------
   const updated = await db.updateRows(updates, 'enricher');
 
-  log.info(`Enriquecedor: ${resolved} obras resueltas por API, ${propagatedGroups} por propagación, ${unresolved} sin match, ${failures} errores → ${updated} torrents actualizados`);
-  return { scanned, groups: groups.size, lookedUp: selected.length, resolved, propagatedGroups, unresolved, failures, updated };
+  if (telemetryUpdates.length) {
+    const tracked = await db.updateRows(telemetryUpdates, 'enricher (telemetría ids)');
+    if (tracked === 0 && db.isRpcAvailable?.()) {
+      log.warn('Las columnas ids_* no se están guardando: la RPC bulk_update_torrents es antigua. Ejecuta la versión actual de sql/002_bulk_update_rpc.sql.');
+    }
+  }
+
+  const throttles = [
+    ['AniList', anilist?.stats?.()],
+    ['Kitsu', kitsu?.stats?.()],
+    ['TMDB', tmdb?.stats?.()],
+  ]
+    .filter(([, s]) => s?.throttles > 0)
+    .map(([n, s]) => `${n}: ${s.throttles}×429 (tasa final ${s.rate}/${s.maxRate}${s.disabled ? ', en pausa' : ''})`);
+  if (throttles.length) log.warn(`enricher: límites de tasa alcanzados → ${throttles.join(' · ')}`);
+
+  log.info(`Enriquecedor: ${resolved} obras resueltas por API, ${propagatedGroups} por propagación, ${unresolved} sin match, ${failures} errores (${rateLimited} por rate limit) → ${updated} torrents actualizados`);
+  return { scanned, groups: groups.size, lookedUp: selected.length, resolved, propagatedGroups, unresolved, failures, rateLimited, updated };
 }

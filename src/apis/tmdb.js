@@ -8,28 +8,78 @@ import { bestSimilarity } from '../utils/text.js';
 
 const BASE = 'https://api.themoviedb.org/3';
 
-export function createTmdbClient({ apiKey, requestsPerSecond = 20, log } = {}) {
-  if (!apiKey) return null;
-  const isBearer = apiKey.startsWith('eyJ') || apiKey.length > 40;
-  const limiter = createRateLimiter({ maxRequests: requestsPerSecond, perMs: 1000 });
+/**
+ * Clasifica una credencial de TMDB.
+ * @returns {'v3'|'v4'|null} `v3` = API key clásica, `v4` = token de lectura (JWT), `null` = vacía.
+ */
+export function tmdbKeyKind(apiKey) {
+  const key = String(apiKey ?? '').trim();
+  if (!key) return null;
+  if (key.startsWith('eyJ') || key.length > 40) return 'v4';
+  return 'v3';
+}
+
+/**
+ * Comprueba la credencial contra TMDB con una llamada barata (`/authentication`).
+ * Nunca lanza: devuelve un diagnóstico listo para loguear.
+ * @returns {Promise<{ok:boolean, status:number|null, kind:'v3'|'v4'|null, message:string}>}
+ */
+export async function validateTmdbKey(apiKey, { timeoutMs = 10000 } = {}) {
+  const kind = tmdbKeyKind(apiKey);
+  const key = String(apiKey ?? '').trim();
+  if (!kind) return { ok: false, status: null, kind: null, message: 'TMDB_API_KEY está vacía' };
+
+  const url = new URL(`${BASE}/authentication`);
+  if (kind === 'v3') url.searchParams.set('api_key', key);
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json', ...(kind === 'v4' ? { Authorization: `Bearer ${key}` } : {}) },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (res.ok) return { ok: true, status: res.status, kind, message: 'credencial aceptada por TMDB' };
+    const body = await res.text().catch(() => '');
+    const hint = res.status === 401 ? ' — key inválida, revocada o mal copiada' : '';
+    return { ok: false, status: res.status, kind, message: `HTTP ${res.status} ${res.statusText}${hint}${body ? ` (${body.slice(0, 200)})` : ''}` };
+  } catch (err) {
+    return { ok: false, status: null, kind, message: `error de red comprobando la key: ${err.message}` };
+  }
+}
+
+export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, maxConsecutiveThrottles, disableMs, log } = {}) {
+  const key = String(apiKey ?? '').trim();
+  if (!key) return null;
+  const isBearer = tmdbKeyKind(key) === 'v4';
+  const limiter = createRateLimiter({ maxRequests: requestsPerSecond, perMs: 1000, name: 'TMDB', baseCooldownMs: cooldownMs, maxConsecutiveThrottles, disableMs, log });
   const cache = new Map();
 
   const get = (path, params = {}) => {
     const url = new URL(`${BASE}${path}`);
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
-    if (!isBearer) url.searchParams.set('api_key', apiKey);
-    const key = url.toString();
-    if (cache.has(key)) return cache.get(key);
-    const p = limiter(() =>
-      fetchJson(key, {
-        headers: isBearer ? { Authorization: `Bearer ${apiKey}` } : {},
+    if (!isBearer) url.searchParams.set('api_key', key);
+    const cacheKey = url.toString();
+    if (cache.has(cacheKey)) return cache.get(cacheKey);
+    const promise = limiter(() =>
+      fetchJson(cacheKey, {
+        headers: isBearer ? { Authorization: `Bearer ${key}` } : {},
         timeoutMs: 15000,
         retries: 3,
+        onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
         onRetry: (err, attempt, wait) => log?.warn(`TMDB: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
       }),
+    ).then(
+      (json) => {
+        limiter.reportSuccess?.();
+        return json;
+      },
+      // Un fallo NO se cachea (mismo razonamiento que en AniList/Kitsu).
+      (err) => {
+        cache.delete(cacheKey);
+        throw err;
+      },
     );
-    cache.set(key, p);
-    return p;
+    cache.set(cacheKey, promise);
+    promise.catch(() => {});
+    return promise;
   };
 
   /**
@@ -90,5 +140,5 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, log } = {}) {
     }
   }
 
-  return { findBest, externalIds };
+  return { findBest, externalIds, stats: () => limiter.stats() };
 }

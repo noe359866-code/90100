@@ -19,6 +19,7 @@ import { appendFileSync } from 'node:fs';
 import { config, validateConfig } from './config.js';
 import { log } from './logger.js';
 import { createDb } from './db.js';
+import { tmdbKeyKind, validateTmdbKey } from './apis/tmdb.js';
 import { runAdultFilter } from './steps/01-adultFilter.js';
 import { runSizeFilter } from './steps/02-sizeFilter.js';
 import { runDeadPurger } from './steps/03-deadPurger.js';
@@ -36,6 +37,39 @@ const STEP_RUNNERS = {
 };
 
 const fmtMs = (ms) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${(ms / 60_000).toFixed(1)}min`);
+
+/**
+ * Diagnóstico de credenciales antes de arrancar.
+ * Existe porque el fallo más común es "puse el secret y sigue saliendo el aviso":
+ * casi siempre es un problema de nombre o de dónde se guardó, no del código.
+ */
+async function preflightCredentials() {
+  const key = config.enrich.tmdbApiKey;
+  const wantsEnrich = config.steps.includes('enrich');
+
+  if (!key) {
+    if (wantsEnrich) {
+      log.warn('TMDB_API_KEY no está definida en el proceso: las movies/series no se enriquecerán.');
+      log.warn('Comprueba en GitHub → Settings → Secrets and variables → Actions:');
+      log.warn('  1. El secret debe llamarse EXACTAMENTE "TMDB_API_KEY" (distingue mayúsculas).');
+      log.warn('  2. Debe estar en la pestaña "Secrets" (no en "Variables" ni dentro de un "Environment":');
+      log.warn('     los secrets de un Environment sólo llegan si el job declara "environment: <nombre>").');
+      log.warn('  3. Hay que relanzar el workflow: los secrets se inyectan al iniciar el job, no en caliente.');
+    }
+    return;
+  }
+
+  const kind = tmdbKeyKind(key);
+  log.info(`TMDB: credencial detectada (${kind === 'v4' ? 'token de lectura v4' : 'API key v3'}, ${key.length} caracteres). Verificando contra TMDB...`);
+  const res = await validateTmdbKey(key);
+  if (res.ok) {
+    log.info('TMDB: credencial válida');
+  } else {
+    log.warn(`TMDB: la credencial NO funciona → ${res.message}`);
+    log.warn('  · Si es 401: la key está mal copiada, revocada o es del otro tipo (v3 vs v4).');
+    log.warn('  · Cópiala de https://www.themoviedb.org/settings/api sin espacios ni saltos de línea.');
+  }
+}
 
 /** Escribe el resumen en $GITHUB_STEP_SUMMARY si estamos en Actions. */
 function writeGithubSummary(results, dbStats, totalMs) {
@@ -61,6 +95,8 @@ function writeGithubSummary(results, dbStats, totalMs) {
 async function main() {
   log.setLevel(config.logLevel);
   validateConfig(config);
+
+  await preflightCredentials();
 
   log.info(`Inicio del mantenimiento de "${config.table}" — pasos: ${config.steps.join(', ')}${config.dryRun ? ' — MODO DRY RUN (no se escribe nada)' : ''}`);
 
