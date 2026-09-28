@@ -12,7 +12,7 @@ Está pensado para ejecutarse en **GitHub Actions** de forma programada.
 | 2 | `size`      | Borra fakes: `movie` < 150 MB, `series`/`anime` < 30 MB (umbrales configurables; ignora tamaño 0/NULL por defecto). |
 | 3 | `dead`      | Borra torrents con `seeders = 0` y `updated_at` con más de 30 días. |
 | 4/5 | `normalize` | Parser inteligente sobre `title` → `title_text` (título limpio), `type`, `season`/`episode`/`absolute_episode`, `codec`, `quality`; arrays `audio`/`subtitles` en minúsculas, canónicos, sin duplicados ni basura. |
-| 6 | `enrich`    | Para huérfanos: AniList (GraphQL) + Kitsu → `anilist_id`, `mal_id`, `kitsu_id`; TMDB (si hay API key) → `tmdb_id` + `imdb_id`. Una consulta por obra, no por torrent; validación por similitud de título + año. Si AniList está saturado (429), Kitsu y TMDB resuelven igualmente (los IDs de AniList/MAL se rescatan vía mappings de Kitsu). |
+| 6 | `enrich`    | Para huérfanos: **TMDB primero** (si hay API key) → `tmdb_id` + `imdb_id`; en anime después AniList (GraphQL) + Kitsu → `anilist_id`, `mal_id`, `kitsu_id`. Una consulta por obra, no por torrent; validación por similitud de título + año. Si TMDB no encuentra el anime con las variantes del parser, reintenta al final con el título canónico de AniList/Kitsu. Si AniList está saturado (429), Kitsu y TMDB resuelven igualmente (los IDs de AniList/MAL se rescatan vía mappings de Kitsu). |
 | 7 | `dedupe`    | Agrupa por obra (`imdb_id` / `tmdb_id` / `anilist_id` / `kitsu_id`, unidos con union-find) + episodio y conserva **sólo el mejor `spanish` y el mejor `english`**. |
 
 Sólo se escriben en la BD las filas que realmente cambian. `DRY_RUN=true` ejecuta todo sin modificar nada.
@@ -93,10 +93,11 @@ El cliente ya se defiende solo:
 - **Interruptor**: con varios `429` seguidos, la API se apaga 10 minutos y falla rápido
   en lugar de reintentar sin parar (reintentar sólo empeora el bloqueo). Las obras
   afectadas quedan para la próxima ejecución.
-- **Fallback Kitsu/TMDB**: si AniList está saturado (429) o no encuentra la obra,
-  Kitsu la resuelve por búsqueda de texto y sus *mappings* rescatan `anilist_id` y
-  `mal_id`; TMDB se consulta igualmente para `tmdb_id`/`imdb_id`. Es decir: los
-  `429` de AniList retrasan poco, en vez de dejar la obra sin resolver.
+- **Fallback Kitsu/TMDB**: TMDB va primero (es la API con más cuota), así que
+  `tmdb_id`/`imdb_id` no dependen de AniList. Si AniList está saturado (429) o no
+  encuentra la obra, Kitsu la resuelve por búsqueda de texto y sus *mappings* rescatan
+  `anilist_id` y `mal_id`. Es decir: los `429` de AniList retrasan poco, en vez de
+  dejar la obra sin resolver.
 - **Sin caché de errores**: una petición fallida no se cachea, así que no envenena
   las siguientes búsquedas del mismo título.
 

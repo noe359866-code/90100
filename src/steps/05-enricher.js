@@ -5,12 +5,13 @@
  *   1. Se agrupan por obra (tipo + título limpio + año [+ temporada en anime])
  *      para hacer UNA sola consulta por obra, no por torrent.
  *   2. Si algún torrent del grupo ya tiene un ID, se propaga al resto sin llamar a la API.
- *   3. Anime  → AniList (GraphQL) → anilist_id + mal_id; Kitsu por mapping exacto
- *              (anilist→kitsu / mal→kitsu) o búsqueda por texto → kitsu_id.
- *              Opcionalmente TMDB (tv) con el título inglés de AniList → tmdb_id + imdb_id.
- *      Si AniList está saturado (429) o no encuentra la obra, Kitsu resuelve por
- *      texto y sus mappings rescatan anilist_id/mal_id; TMDB se busca igualmente
- *      (con las variantes del parser y el título canónico de Kitsu).
+ *   3. Anime  → TMDB primero (es la API con más cuota) con las variantes del parser
+ *              → tmdb_id; después AniList (GraphQL) → anilist_id + mal_id y Kitsu
+ *              (mappings anilist→kitsu / mal→kitsu o búsqueda por texto) → kitsu_id.
+ *              Si TMDB no encontró match, se reintenta al final con los títulos
+ *              canónicos de AniList/Kitsu → imdb_id vía external_ids del tmdb_id.
+ *              Si AniList está saturado (429) o no encuentra la obra, Kitsu resuelve por
+ *              texto y sus mappings rescatan anilist_id/mal_id; TMDB ya habrá resuelto.
  *      Movie/Series → TMDB search → tmdb_id → external_ids → imdb_id.
  *   4. Cada match se valida por similitud de título (+ año) para evitar falsos positivos.
  *
@@ -113,8 +114,36 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   };
 
   if (group.type === 'anime') {
-    // --- AniList ---
+    // --- TMDB (1ª pasada, sólo con las variantes del parser) ---
+    // TMDB va primero: es la API con más cuota (20 req/s frente a las 20 req/min
+    // de AniList) y así tmdb_id/imdb_id no esperan en la cola de AniList. Si con
+    // las variantes del parser no hay match, al final se reintenta con los títulos
+    // canónicos de AniList/Kitsu (2ª pasada), que era la ventaja del orden antiguo.
     let englishTitle = null;
+    let kitsuTitle = null;
+    let tmdbId = known.tmdb_id || null;
+    let kind = 'tv';
+    let kindKnown = false;
+    const tmdbWanted = Boolean(tmdb) && (need('tmdb_id') || need('imdb_id'));
+    const tryTmdb = async (extraTitles) => {
+      if (!tmdb || tmdbId || !need('tmdb_id')) return;
+      const tmdbVariants = extraTitles.length ? [...new Set([...extraTitles, ...variants])] : variants;
+      let hit = await guard(() => tmdb.findBest('tv', tmdbVariants, { year, minSimilarity }));
+      if (!hit && !group.hasEpisode) {
+        hit = await guard(() => tmdb.findBest('movie', tmdbVariants, { year, minSimilarity }));
+      }
+      if (hit) {
+        tmdbId = hit.tmdb_id;
+        kind = hit.kind || kind;
+        kindKnown = true;
+        credit('tmdb', hit.score);
+        found.tmdb_id = tmdbId;
+        log.debug(`TMDB ✓ "${group.label}" → ${kind}/${tmdbId} (${hit.title} ${hit.year ?? ''}, score ${hit.score.toFixed(2)})`);
+      }
+    };
+    if (tmdbWanted) await tryTmdb([]);
+
+    // --- AniList ---
     // Si AniList nos ha cerrado el grifo por rate limit, no insistimos: esa obra
     // se queda sin resolver y se reintentará en la próxima ejecución.
     const anilistBlocked = anilist?.stats?.().disabled === true;
@@ -135,7 +164,6 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
     // No se salta aunque AniList esté en pausa: Kitsu resuelve kitsu_id y, con
     // sus mappings, puede rescatar también anilist_id/mal_id cuando AniList da
     // 429 o no encuentra la obra.
-    let kitsuTitle = null;
     if (need('kitsu_id') || need('anilist_id') || need('mal_id')) {
       const anilistId = known.anilist_id || found.anilist_id;
       const malId = known.mal_id || found.mal_id;
@@ -175,38 +203,20 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
         if (rescued.length) log.debug(`Kitsu mappings ✓ "${group.label}" → ${rescued.join(' ')} (fallback)`);
       }
     }
-    // --- TMDB (opcional para anime) ---
-    if (tmdb && (need('tmdb_id') || need('imdb_id'))) {
-      let tmdbId = known.tmdb_id || found.tmdb_id || null;
-      let kind = 'tv';
-      let kindKnown = false;
-      if (!tmdbId) {
-        // Sin el título inglés de AniList (p. ej. por un 429) se buscan las
-        // variantes del parser más el título canónico de Kitsu.
-        const extraTitles = [...new Set([englishTitle, kitsuTitle].filter(Boolean))];
-        const tmdbVariants = extraTitles.length ? [...extraTitles, ...variants] : variants;
-        let hit = await guard(() => tmdb.findBest('tv', tmdbVariants, { year, minSimilarity }));
-        if (!hit && !group.hasEpisode) {
-          hit = await guard(() => tmdb.findBest('movie', tmdbVariants, { year, minSimilarity }));
-        }
-        if (hit) {
-          tmdbId = hit.tmdb_id;
-          kind = hit.kind || kind;
-          kindKnown = true;
-          credit('tmdb', hit.score);
-          if (need('tmdb_id')) found.tmdb_id = tmdbId;
-        }
+    // --- TMDB (2ª pasada, con los títulos canónicos si los hay) ---
+    if (tmdbWanted && (englishTitle || kitsuTitle)) {
+      await tryTmdb([englishTitle, kitsuTitle].filter(Boolean));
+    }
+    // --- imdb_id a partir del tmdb_id ---
+    if (tmdb && tmdbId && need('imdb_id')) {
+      let ext = await guard(() => tmdb.externalIds(kind, tmdbId));
+      // Un tmdb_id ya guardado no dice si es movie o tv. Sólo entonces se prueba el otro tipo.
+      if (!kindKnown && !cleanImdbId(ext?.imdb_id) && kind === 'tv') {
+        const movieExt = await guard(() => tmdb.externalIds('movie', tmdbId));
+        if (cleanImdbId(movieExt?.imdb_id)) ext = movieExt;
       }
-      if (tmdbId && need('imdb_id')) {
-        let ext = await guard(() => tmdb.externalIds(kind, tmdbId));
-        // Un tmdb_id ya guardado no dice si es movie o tv. Sólo entonces se prueba el otro tipo.
-        if (!kindKnown && !cleanImdbId(ext?.imdb_id) && kind === 'tv') {
-          const movieExt = await guard(() => tmdb.externalIds('movie', tmdbId));
-          if (cleanImdbId(movieExt?.imdb_id)) ext = movieExt;
-        }
-        const extImdb = cleanImdbId(ext?.imdb_id);
-        if (extImdb) found.imdb_id = extImdb;
-      }
+      const extImdb = cleanImdbId(ext?.imdb_id);
+      if (extImdb) found.imdb_id = extImdb;
     }
   } else if (tmdb) {
     let kind = group.type === 'movie' ? 'movie' : 'tv';

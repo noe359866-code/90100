@@ -129,7 +129,8 @@ test('fallback: con AniList saturado, Kitsu y TMDB resuelven la obra igualmente'
     assert.equal(r.kitsu_id, frieren ? 46474 : 50026, `kitsu_id de ${r.title}`);
     assert.equal(r.tmdb_id, frieren ? 209867 : 114410, `tmdb_id de ${r.title}`);
     assert.equal(r.imdb_id, frieren ? 'tt22103410' : 'tt12708542', `imdb_id de ${r.title}`);
-    assert.equal(r.ids_source, 'kitsu+tmdb');
+    // Orden de resolución: TMDB primero, luego Kitsu (AniList estaba saturado).
+    assert.equal(r.ids_source, 'tmdb+kitsu');
     assert.equal(r.ids_attempts, 1);
     assert.equal(r.ids_checked_at != null, true);
   }
