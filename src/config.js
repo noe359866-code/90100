@@ -113,6 +113,13 @@ export const config = Object.freeze({
   pageSize: clamp(toInt(env.PAGE_SIZE, 1000), 50, 1000), // PostgREST limita a 1000 por defecto
   deleteChunkSize: clamp(toInt(env.DELETE_CHUNK_SIZE, 500), 10, 1000),
   updateConcurrency: Math.max(toInt(env.UPDATE_CONCURRENCY, 8), 1),
+  /**
+   * Filas por llamada a la RPC `bulk_update_torrents` (o por ronda del fallback
+   * fila a fila). 500 recorta a la mitad los round-trips que el enriquecedor
+   * necesita para guardar la telemetría ids_* (una por fila escaneada) sin
+   * arriesgar statement timeouts: la RPC es un único UPDATE ... FROM.
+   */
+  updateChunkSize: clamp(toInt(env.UPDATE_CHUNK_SIZE, 500), 10, 2000),
   /** Límite de seguridad: si un paso quiere borrar más de este % de las filas evaluadas, aborta. */
   maxDeleteRatio: toRatio(env.MAX_DELETE_RATIO, 0.95),
 

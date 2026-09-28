@@ -89,21 +89,60 @@ export function createDb(config, { client } = {}) {
    * @param {string} p.select
    * @param {(q: any) => any} [p.applyFilters]
    * @param {number} [p.pageSize]
+   * @param {number} [p.prefetch] páginas en vuelo simultáneas (1 = secuencial, como
+   *   siempre; 2-3 solapa la petición de la página siguiente con el procesado de la
+   *   actual). El orden de entrega y el cursor keyset no cambian.
    */
-  async function* iterateRows({ select, applyFilters = (q) => q, pageSize = config.pageSize }) {
+  async function* iterateRows({ select, applyFilters = (q) => q, pageSize = config.pageSize, prefetch = 1 }) {
+    const depth = Math.max(1, Math.min(Number(prefetch) || 1, 8));
     let lastId = null;
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { data } = await run('select page', () => {
-        let q = table().select(select).order('id', { ascending: true }).limit(pageSize);
-        if (lastId !== null) q = q.gt('id', lastId);
-        return applyFilters(q);
+    let exhausted = false;
+
+    // Cursor keyset: cada página necesita el último id de la anterior. Encadenamos
+    // promesas para mantener hasta `depth` peticiones en vuelo; la cadena decide el
+    // cursor, así que las páginas se entregan en orden y no hay solapes de filas.
+    let tail = Promise.resolve(null);
+    const pending = [];
+    const schedule = () => {
+      if (exhausted) return;
+      tail = tail.then((prevPage) => {
+        if (exhausted) return null;
+        if (prevPage) {
+          if (prevPage.length < pageSize) {
+            exhausted = true; // era la última página
+            return null;
+          }
+          lastId = prevPage[prevPage.length - 1].id;
+        }
+        return run('select page', () => {
+          let q = table().select(select).order('id', { ascending: true }).limit(pageSize);
+          if (lastId !== null) q = q.gt('id', lastId);
+          return applyFilters(q);
+        }).then((res) => {
+          stats.selectCalls += 1;
+          return res.data ?? [];
+        }, (err) => {
+          exhausted = true;
+          throw err;
+        });
       });
-      stats.selectCalls += 1;
-      if (!data || data.length === 0) return;
-      yield data;
-      if (data.length < pageSize) return;
-      lastId = data[data.length - 1].id;
+      pending.push(tail);
+    };
+
+    try {
+      while (true) {
+        while (!exhausted && pending.length < depth) schedule();
+        const page = await pending.shift();
+        if (!page || page.length === 0) return;
+        yield page;
+      }
+    } finally {
+      exhausted = true;
+      // Si el consumidor corta antes o una página falla, el resto de la cadena
+      // rechaza con el mismo error: lo marcamos como manejado (si no, Node
+      // interpretaría cada eslabón pendiente como unhandledRejection).
+      for (const p of pending) p.catch(() => {});
+      pending.length = 0;
     }
   }
 
@@ -251,7 +290,7 @@ export function createDb(config, { client } = {}) {
         return 0;
       }
     };
-    for (const part of chunk(valid, 200)) {
+    for (const part of chunk(valid, config.updateChunkSize ?? 500)) {
       let viaRpc = null;
       try {
         viaRpc = await tryBulkRpc(part.map((u) => ({ id: String(u.id), patch: u.patch })));
