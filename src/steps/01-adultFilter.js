@@ -10,6 +10,8 @@
  *      "Boobs" dentro de "Booby Trap", etc.).
  */
 
+import { exceedsDeleteRatio, deleteRatioError } from './guard.js';
+
 /**
  * Palabras que por sí solas marcan contenido adulto (con límite de palabra).
  *
@@ -75,6 +77,8 @@ export function buildAdultRegex(extra = []) {
 }
 
 const HARD_RE = new RegExp(`(^|[^a-z0-9])(${HARD_KEYWORDS.map(escapeRe).join('|')})([^a-z0-9]|$)`, 'i');
+/** Versión global reutilizable: crear la RegExp en cada fila era coste puro. */
+const HARD_RE_G = new RegExp(HARD_RE.source, 'gi');
 
 /**
  * Películas reales cuyo título contiene una palabra dura de estudio.
@@ -90,11 +94,17 @@ const fold = (s) => String(s ?? '')
   .replace(/[^a-z0-9]+/g, ' ')
   .trim();
 
+/**
+ * Ámbitos ya "doblados" (minúsculas, sin acentos, separadores normalizados):
+ * `isAdultTitle` se ejecuta por cada fila candidata y volver a doblar la lista
+ * blanca en cada comprobación era puro desperdicio.
+ */
 const FOLDED_WHITELIST = WHITELIST.map(fold).filter(Boolean);
-const hasPhrase = (foldedTitle, phrase) => {
-  const p = fold(phrase);
-  return Boolean(p) && ` ${foldedTitle} `.includes(` ${p} `);
-};
+const FOLDED_HARD_EXCEPTIONS = HARD_EXCEPTIONS.map(fold).filter(Boolean);
+
+/** Comprueba una frase YA doblada dentro de un título YA doblado. */
+const containsFoldedPhrase = (foldedTitle, foldedPhrase) =>
+  Boolean(foldedPhrase) && ` ${foldedTitle} `.includes(` ${foldedPhrase} `);
 
 /**
  * Decide en cliente si un título es adulto (precisión sobre el candidato del servidor).
@@ -108,12 +118,14 @@ export function isAdultTitle(title, adultRe) {
   adultRe.lastIndex = 0;
   if (!adultRe.test(t)) return false;
   const folded = fold(title);
-  const hardHits = [...t.matchAll(new RegExp(HARD_RE.source, 'gi'))].map((m) => m[2]);
+  HARD_RE_G.lastIndex = 0;
+  const hardHits = [...t.matchAll(HARD_RE_G)].map((m) => m[2]);
   if (hardHits.length) {
-    const knownFilm = hardHits.every((h) => h === 'vixen') && HARD_EXCEPTIONS.some((w) => hasPhrase(folded, w));
+    const knownFilm = hardHits.every((h) => h.toLowerCase() === 'vixen')
+      && FOLDED_HARD_EXCEPTIONS.some((w) => containsFoldedPhrase(folded, w));
     return !knownFilm;
   }
-  return !FOLDED_WHITELIST.some((w) => hasPhrase(folded, w));
+  return !FOLDED_WHITELIST.some((w) => containsFoldedPhrase(folded, w));
 }
 
 /**
@@ -128,9 +140,8 @@ export async function runAdultFilter(db, config, log) {
     db.countWhere((q) => q.filter('title', 'imatch', pattern), 'adult-filter pending'),
     db.countWhere((q) => q, 'adult-filter evaluated'),
   ]);
-  if (evaluated > 0 && pending / evaluated > config.maxDeleteRatio) {
-    const pct = ((pending / evaluated) * 100).toFixed(1);
-    throw new Error(`adult-filter: el prefiltro marcaría ${pending} de ${evaluated} filas (${pct}%), por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad.`);
+  if (exceedsDeleteRatio(pending, evaluated, config.maxDeleteRatio)) {
+    throw deleteRatioError('adult-filter (prefiltro)', pending, evaluated, config.maxDeleteRatio);
   }
 
   const deleted = await db.deleteWhere(

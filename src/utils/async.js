@@ -4,10 +4,15 @@
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Parte un array en trozos de tamaño `size`. */
+/**
+ * Parte un array en trozos de tamaño `size`.
+ * El tamaño se normaliza a entero ≥ 1: con 0, NaN o negativo el bucle no avanzaría
+ * (bucle infinito).
+ */
 export function chunk(array, size) {
+  const step = Math.max(1, Math.floor(Number(size)) || 1);
   const out = [];
-  for (let i = 0; i < array.length; i += size) out.push(array.slice(i, i + size));
+  for (let i = 0; i < array.length; i += step) out.push(array.slice(i, i + step));
   return out;
 }
 

@@ -21,25 +21,58 @@
  *   una cantidad de seeders comparable.
  */
 import { parseTitle } from '../parser/titleParser.js';
-import { classifyLanguage, normalizeLanguageArray } from '../parser/languages.js';
+import { classifyLanguage, normalizeLanguageArray, SPANISH_GROUP, ENGLISH_GROUP } from '../parser/languages.js';
 import { normalizeCodec, normalizeQuality } from '../parser/normalizers.js';
+import { exceedsDeleteRatio, deleteRatioError } from './guard.js';
+
+/**
+ * Una lista de idiomas que sólo trae el título se fusiona con la de la BD.
+ * Mismo resultado que `[...new Set([...a, ...b])]` pero sin crear un Set ni dos
+ * arrays intermedios por fila (esto corre sobre tablas enteras).
+ */
+const mergeLanguages = (fromRow, fromTitle) => {
+  if (!fromTitle.length) return fromRow;
+  if (!fromRow.length) return fromTitle;
+  let out = fromRow;
+  for (const l of fromTitle) {
+    if (out.includes(l)) continue;
+    if (out === fromRow) out = fromRow.slice();
+    out.push(l);
+  }
+  return out;
+};
 
 // ---------------------------------------------------------------------------
 // Union-Find para unir identificadores de la misma obra
 // ---------------------------------------------------------------------------
 class UnionFind {
-  constructor() { this.parent = new Map(); }
+  constructor() {
+    this.parent = new Map();
+    /** Tamaño de cada árbol: unir el pequeño bajo el grande evita cadenas largas
+     *  (con tablas de cientos de miles de filas la diferencia se nota). */
+    this.size = new Map();
+  }
   find(x) {
-    if (!this.parent.has(x)) this.parent.set(x, x);
+    if (!this.parent.has(x)) {
+      this.parent.set(x, x);
+      this.size.set(x, 1);
+    }
     let root = x;
     while (this.parent.get(root) !== root) root = this.parent.get(root);
+    // Compresión de caminos completa.
     while (this.parent.get(x) !== root) { const next = this.parent.get(x); this.parent.set(x, root); x = next; }
     return root;
   }
   union(a, b) {
-    const ra = this.find(a);
-    const rb = this.find(b);
-    if (ra !== rb) this.parent.set(rb, ra);
+    let ra = this.find(a);
+    let rb = this.find(b);
+    if (ra === rb) return;
+    const sa = this.size.get(ra) ?? 1;
+    const sb = this.size.get(rb) ?? 1;
+    if (sa < sb) [ra, rb] = [rb, ra];
+    this.parent.set(rb, ra);
+    this.size.set(ra, sa + sb);
+    this.size.delete(rb);
   }
 }
 
@@ -127,7 +160,9 @@ export function scoreTorrent(row, parsed, { seederWeight = 20 } = {}) {
   if (size > 30 * 1024 ** 3) breakdown.extras -= 10; // > 30 GB: pesado para streaming
   if (size > 0 && size < 300 * 1024 ** 2 && quality === '1080p') breakdown.extras -= 10; // 1080p sospechosamente pequeño
 
-  const score = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  // Suma directa en vez de crear un array con Object.values() por fila.
+  const score = breakdown.seeders + breakdown.codec + breakdown.container + breakdown.source
+    + breakdown.quality + breakdown.audio + breakdown.hdr + breakdown.extras;
   return { score, breakdown };
 }
 
@@ -144,9 +179,35 @@ function compareCandidates(a, b) {
 }
 
 /**
+ * Margen de puntuación en el que se prefiere el idioma en el AUDIO.
+ *
+ * Un doblaje al español es mejor experiencia que un "sólo subtítulos" (VOSE) para
+ * el usuario de Stremio, pero los seeders mandan: un VOSE con muchos más seeders
+ * se ve y el doblaje con cuatro seeders puede que no. Por eso el desempate sólo
+ * se aplica cuando están casi empatados: 10 puntos ≈ la mitad de una duplicación
+ * de seeders (con peso 20, cada duplicación vale 20 puntos).
+ */
+export const AUDIO_TIE_MARGIN = 10;
+
+/**
+ * Reordena (si procede) para que el mejor candidato con el idioma en el audio
+ * quede primero, siempre que no esté a más de `AUDIO_TIE_MARGIN` puntos del mejor.
+ * @param {object[]} ranked ya ordenado de mejor a peor
+ * @param {'spanish'|'english'} flag qué campo de audio mirar (`spanishAudio`/`englishAudio`)
+ */
+function preferAudioMatch(ranked, flag) {
+  if (ranked.length < 2) return ranked;
+  const field = flag === 'spanish' ? 'spanishAudio' : 'englishAudio';
+  if (ranked[0][field] === true) return ranked;
+  const alt = ranked.find((c, i) => i > 0 && c[field] === true && ranked[0].score - c.score <= AUDIO_TIE_MARGIN);
+  if (!alt) return ranked;
+  return [alt, ...ranked.filter((c) => c !== alt)];
+}
+
+/**
  * Decide qué filas conservar y cuáles borrar dentro de un grupo obra+episodio.
  * Función pura (testeable).
- * @param {Array<{row:object, parsed:object, score:number, lang:object}>} candidates
+ * @param {Array<{row:object, score:number, lang:object, spanishAudio?:boolean, englishAudio?:boolean}>} candidates
  * @param {object} dedupeConfig
  * @returns {{ keep: Set<any>, remove: any[] }}
  */
@@ -174,8 +235,11 @@ export function selectSurvivors(candidates, dedupeConfig) {
   }
   spanish.sort(compareCandidates);
   english.sort(compareCandidates);
-  if (spanish.length) keep.add(spanish[0].row.id);
-  if (english.length) keep.add(english[0].row.id);
+  // Entre candidatos casi empatados, el doblaje gana al "sólo subtítulos".
+  const esRanked = preferAudioMatch(spanish, 'spanish');
+  const enRanked = preferAudioMatch(english, 'english');
+  if (esRanked.length) keep.add(esRanked[0].row.id);
+  if (enRanked.length) keep.add(enRanked[0].row.id);
   for (const c of untouched) keep.add(c.row.id);
 
   // Dos copias en francés (u otro idioma) no deben borrarse mutuamente: si no queda
@@ -211,60 +275,87 @@ export async function runDeduplicator(db, config, log) {
         ids = [`title:${row.type || parsed.type}:${parsed.searchKey}:${parsed.year ?? ''}`];
       }
       for (let i = 1; i < ids.length; i += 1) uf.union(ids[0], ids[i]);
-      uf.find(ids[0]);
 
-      const audio = [...new Set([...normalizeLanguageArray(row.audio), ...parsed.languages.audio])];
-      const subtitles = [...new Set([...normalizeLanguageArray(row.subtitles), ...parsed.languages.subtitles])];
+      const audio = mergeLanguages(normalizeLanguageArray(row.audio), parsed.languages.audio);
+      const subtitles = mergeLanguages(normalizeLanguageArray(row.subtitles), parsed.languages.subtitles);
       const lang = classifyLanguage({ audio, subtitles });
       const { score } = scoreTorrent(row, parsed, { seederWeight: config.dedupe.seederWeight });
 
+      // Sólo lo imprescindible: la tabla entera cabe en memoria durante el paso,
+      // así que cada campo de más se multiplica por cientos de miles de filas.
       entries.push({
         primaryId: ids[0],
         epKey: episodeKey(row, parsed),
         score,
         lang,
-        parsed: { container: parsed.container, source: parsed.source, codec: parsed.codec },
+        // El idioma "de verdad" (audio) se distingue de los subtítulos: sirve para
+        // desempatar entre un doblaje y un VOSE cuando están igualados.
+        spanishAudio: audio.some((l) => SPANISH_GROUP.has(l)) || undefined,
+        englishAudio: audio.some((l) => ENGLISH_GROUP.has(l)) || undefined,
         row: { id: row.id, seeders: row.seeders, size_bytes: row.size_bytes, updated_at: row.updated_at, title: row.title },
       });
     }
     if (scanned % (config.pageSize * 20) === 0) log.info(`dedupe: ${scanned} filas cargadas...`);
   }
 
-  // --- Agrupar por (raíz de obra, episodio) ---
+  // --- Agrupar por obra → episodio ---
+  // Map anidado en lugar de una clave de texto (`raíz|episodio`) por fila: evita
+  // crear y comparar cientos de miles de cadenas y deja el episodio a mano.
+  /** @type {Map<string, Map<string, object[]>>} */
   const groups = new Map();
   for (const e of entries) {
-    const key = `${uf.find(e.primaryId)}|${e.epKey}`;
-    let g = groups.get(key);
-    if (!g) { g = []; groups.set(key, g); }
-    g.push(e);
+    const root = uf.find(e.primaryId);
+    let byEpisode = groups.get(root);
+    if (!byEpisode) { byEpisode = new Map(); groups.set(root, byEpisode); }
+    let bucket = byEpisode.get(e.epKey);
+    if (!bucket) { bucket = []; byEpisode.set(e.epKey, bucket); }
+    bucket.push(e);
   }
 
   // --- Seleccionar supervivientes ---
   const toDelete = [];
+  let groupCount = 0;
   let groupsWithDuplicates = 0;
+  let unknownEpisodeGroups = 0;
+  let unknownEpisodeRows = 0;
   let sampleLogged = 0;
-  for (const [key, candidates] of groups) {
-    if (candidates.length < 2) continue;
-    const { keep, remove } = selectSurvivors(candidates, config.dedupe);
-    if (!remove.length) continue;
-    groupsWithDuplicates += 1;
-    toDelete.push(...remove);
-    if (sampleLogged < 15) {
-      sampleLogged += 1;
-      const kept = candidates.filter((c) => keep.has(c.row.id)).map((c) => `✓ [${c.score.toFixed(0)}] ${c.row.title}`);
-      const removed = candidates.filter((c) => !keep.has(c.row.id)).map((c) => `✗ [${c.score.toFixed(0)}] ${c.row.title}`);
-      log.debug(`dedupe grupo ${key}:\n   ${[...kept, ...removed].join('\n   ')}`);
+  for (const [root, byEpisode] of groups) {
+    for (const [epKey, candidates] of byEpisode) {
+      groupCount += 1;
+      if (candidates.length < 2) continue;
+      // Episodio NO identificable (`full`): no se borra nada. Dos releases
+      // "Serie 1080p WEB-DL" y "Serie 720p HDTV" pueden ser dos episodios
+      // distintos cuyo título no traía número; agruparlos por la fuerza borraría
+      // la única copia de uno de ellos. Se dejan intactos y se informa.
+      if (epKey === 'full') {
+        unknownEpisodeGroups += 1;
+        unknownEpisodeRows += candidates.length;
+        continue;
+      }
+      const { keep, remove } = selectSurvivors(candidates, config.dedupe);
+      if (!remove.length) continue;
+      groupsWithDuplicates += 1;
+      toDelete.push(...remove);
+      if (sampleLogged < 15) {
+        sampleLogged += 1;
+        const kept = candidates.filter((c) => keep.has(c.row.id)).map((c) => `✓ [${c.score.toFixed(0)}] ${c.row.title}`);
+        const removed = candidates.filter((c) => !keep.has(c.row.id)).map((c) => `✗ [${c.score.toFixed(0)}] ${c.row.title}`);
+        log.debug(`dedupe grupo ${root} ${epKey}:\n   ${[...kept, ...removed].join('\n   ')}`);
+      }
     }
   }
 
   // --- Salvaguarda ---
   const ratio = entries.length ? toDelete.length / entries.length : 0;
-  log.info(`dedupe: ${scanned} filas (${skippedNoId} sin IDs ignoradas), ${groups.size} grupos obra+episodio, ${groupsWithDuplicates} con duplicados → ${toDelete.length} a eliminar (${(ratio * 100).toFixed(1)}%)`);
-  if (toDelete.length && ratio > config.maxDeleteRatio) {
-    throw new Error(`dedupe: se eliminarían ${(ratio * 100).toFixed(1)}% de las filas evaluadas, por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad (revisa con DRY_RUN=true o sube el límite).`);
+  if (unknownEpisodeGroups > 0) {
+    log.info(`dedupe: ${unknownEpisodeRows} filas en ${unknownEpisodeGroups} grupos sin episodio identificable se dejan intactas (no se puede saber si son el mismo episodio)`);
+  }
+  log.info(`dedupe: ${scanned} filas (${skippedNoId} sin IDs ignoradas), ${groupCount} grupos obra+episodio, ${groupsWithDuplicates} con duplicados → ${toDelete.length} a eliminar (${(ratio * 100).toFixed(1)}%)`);
+  if (exceedsDeleteRatio(toDelete.length, entries.length, config.maxDeleteRatio)) {
+    throw deleteRatioError('dedupe', toDelete.length, entries.length, config.maxDeleteRatio);
   }
 
   const deleted = await db.deleteByIds(toDelete, 'dedupe');
   log.info(`Deduplicador: ${deleted} torrents excedentes eliminados`);
-  return { scanned, skippedNoId, groups: groups.size, groupsWithDuplicates, deleted };
+  return { scanned, skippedNoId, groups: groupCount, groupsWithDuplicates, deleted, skippedUnknownEpisode: unknownEpisodeRows };
 }

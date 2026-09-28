@@ -265,6 +265,8 @@ export function detectLanguagesInText(text, { allowCodes = true } = {}) {
   let work = String(text);
   const consume = (g) => {
     g.lastIndex = 0; // regex compartida: siempre desde el principio
+    // OJO: `replace` con callback es más lento que `test` cuando (como aquí) la
+    // mayoría de las 40 reglas no coinciden; medido 2,7× peor con una sola pasada.
     if (!g.test(work)) return false;
     work = work.replace(g, (m) => ' '.repeat(m.length));
     return true;

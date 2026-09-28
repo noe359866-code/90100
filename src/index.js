@@ -18,6 +18,7 @@
 import { appendFileSync } from 'node:fs';
 import { config, validateConfig } from './config.js';
 import { log } from './logger.js';
+import { exitSoon } from './utils/exit.js';
 import { createDb } from './db.js';
 import { tmdbKeyKind, validateTmdbKey } from './apis/tmdb.js';
 import { runAdultFilter } from './steps/01-adultFilter.js';
@@ -37,6 +38,13 @@ const STEP_RUNNERS = {
 };
 
 const fmtMs = (ms) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${(ms / 60_000).toFixed(1)}min`);
+
+/**
+ * Etiqueta legible de un paso. `config.steps` sale de `ALL_STEPS`, así que un paso
+ * sin runner (sólo posible si se añade a la lista y se olvida el runner) no debe
+ * tumbar el resumen con un `undefined.title`.
+ */
+const stepLabel = (step) => STEP_RUNNERS[step]?.title ?? String(step);
 
 /**
  * Diagnóstico de credenciales antes de arrancar.
@@ -87,7 +95,7 @@ function writeGithubSummary(results, dbStats, totalMs) {
     const status = r.error ? '❌ error' : '✅ ok';
     const raw = r.error ? r.error : JSON.stringify(r.result);
     const detail = '`' + String(raw).replace(/[|\n\r`]/g, ' ').slice(0, 500) + '`';
-    lines.push(`| ${STEP_RUNNERS[r.step].title} | ${status} | ${fmtMs(r.ms)} | ${detail} |`);
+    lines.push(`| ${stepLabel(r.step)} | ${status} | ${fmtMs(r.ms)} | ${detail} |`);
   }
   lines.push('');
   try { appendFileSync(file, `${lines.join('\n')}\n`); } catch (err) { log.warn(`No se pudo escribir GITHUB_STEP_SUMMARY: ${err.message}`); }
@@ -96,6 +104,7 @@ function writeGithubSummary(results, dbStats, totalMs) {
 async function main() {
   log.setLevel(config.logLevel);
   validateConfig(config);
+  for (const warning of config.warnings ?? []) log.warn(warning);
 
   await preflightCredentials();
 
@@ -110,7 +119,15 @@ async function main() {
   let failed = false;
 
   for (const step of config.steps) {
-    const { title, run } = STEP_RUNNERS[step];
+    const runner = STEP_RUNNERS[step];
+    if (!runner) {
+      // Sólo puede pasar si se añade un paso a ALL_STEPS sin su runner (hay test).
+      failed = true;
+      log.error(`Paso desconocido en STEP_RUNNERS: "${step}"`);
+      results.push({ step, error: `paso desconocido: ${step}`, ms: 0 });
+      continue;
+    }
+    const { title, run } = runner;
     log.group(title);
     const start = Date.now();
     try {
@@ -120,10 +137,8 @@ async function main() {
       failed = true;
       log.error(`Paso "${step}" falló: ${err.stack || err.message}`);
       results.push({ step, error: err.message, ms: Date.now() - start });
-      if (!config.continueOnError) {
-        log.groupEnd();
-        break;
-      }
+      // El `finally` cierra el grupo; cerrarlo aquí también duplicaba el ::endgroup::.
+      if (!config.continueOnError) break;
     } finally {
       log.groupEnd();
     }
@@ -132,7 +147,7 @@ async function main() {
   const totalMs = Date.now() - t0;
   log.info('================ RESUMEN ================');
   for (const r of results) {
-    log.info(`${r.error ? '✗' : '✓'} ${STEP_RUNNERS[r.step].title} (${fmtMs(r.ms)}) → ${r.error ? r.error : JSON.stringify(r.result)}`);
+    log.info(`${r.error ? '✗' : '✓'} ${stepLabel(r.step)} (${fmtMs(r.ms)}) → ${r.error ? r.error : JSON.stringify(r.result)}`);
   }
   log.info(`Totales BD: ${JSON.stringify(db.stats)} · duración ${fmtMs(totalMs)}`);
   writeGithubSummary(results, db.stats, totalMs);
@@ -140,11 +155,11 @@ async function main() {
   const code = failed ? 1 : 0;
   process.exitCode = code;
   // supabase-js / undici pueden dejar sockets abiertos y el job de Actions no termina.
-  setTimeout(() => process.exit(code), 50);
+  exitSoon(code);
 }
 
 main().catch((err) => {
   log.error(err.stack || err.message);
   process.exitCode = 1;
-  setTimeout(() => process.exit(1), 50);
+  exitSoon(1);
 });

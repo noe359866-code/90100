@@ -7,6 +7,7 @@ import { scoreTorrent, selectSurvivors, episodeKey, workIdentifiers } from '../s
 import { parseTitle } from '../src/parser/titleParser.js';
 import { classifyLanguage, normalizeLanguageArray } from '../src/parser/languages.js';
 import { normalizeQuality } from '../src/parser/normalizers.js';
+import { exceedsDeleteRatio, deleteRatioError } from '../src/steps/guard.js';
 
 // ---------------------------------------------------------------------------
 // Paso 1 — filtro adulto
@@ -188,4 +189,32 @@ test('dedupe: episodeKey y workIdentifiers', () => {
   assert.equal(episodeKey({ type: 'series', season: 1, episode: 1 }, parseTitle('Show Name S01E01 720p')), 's1e1');
   assert.deepEqual(workIdentifiers({ type: 'movie', imdb_id: 'TT123', tmdb_id: 5, anilist_id: null, kitsu_id: null }, p), ['imdb:tt123', 'tmdb:movie:5']);
   assert.deepEqual(workIdentifiers({ type: 'series', tmdb_id: 5 }, p), ['tmdb:tv:5']);
+});
+
+// ---------------------------------------------------------------------------
+// Salvaguarda de borrado (src/steps/guard.js)
+// ---------------------------------------------------------------------------
+test('guard: aplica el ratio sólo cuando hay filas suficientes', () => {
+  // Tabla diminuta: el porcentaje es ruido → no se aborta aunque sea el 100 %.
+  assert.equal(exceedsDeleteRatio(4, 4, 0.95), false);
+  assert.equal(exceedsDeleteRatio(9, 9, 0.01), false);
+  // A partir del mínimo, el ratio manda.
+  assert.equal(exceedsDeleteRatio(9, 10, 0.95), false);
+  assert.equal(exceedsDeleteRatio(10, 10, 0.95), true);
+  assert.equal(exceedsDeleteRatio(100, 1000, 0.95), false);
+  assert.equal(exceedsDeleteRatio(960, 1000, 0.95), true);
+});
+
+test('guard: valores degenerados no abortan', () => {
+  assert.equal(exceedsDeleteRatio(0, 100, 0.5), false);
+  assert.equal(exceedsDeleteRatio(5, 0, 0.5), false);
+  assert.equal(exceedsDeleteRatio(NaN, 100, 0.5), false);
+  assert.equal(exceedsDeleteRatio(50, NaN, 0.5), false);
+  assert.equal(exceedsDeleteRatio(Infinity, 10, 0.5), false);
+});
+
+test('guard: el error explica las cifras y el límite', () => {
+  const err = deleteRatioError('dedupe', 960, 1000, 0.95);
+  assert.match(err.message, /960 de 1000 filas \(96\.0%\)/);
+  assert.match(err.message, /MAX_DELETE_RATIO=0\.95/);
 });

@@ -59,6 +59,12 @@ const cases = [
   { in: 'A Complete Unknown (2024) 1080p BluRay', type: 'movie', title: 'A Complete Unknown', year: 2024, complete: false },
   { in: 'Show.Name.S01.Complete.1080p', type: 'series', title: 'Show Name', season: 1, pack: true, complete: true },
   { in: 'Cap.209 The Show', title: 'The Show', season: 2, episode: 9 },
+  // Notaciones con separador múltiple ("Ep." + espacio) y "Temporada" abreviada.
+  { in: 'Show Ep. 5 720p', title: 'Show', season: null, episode: 5, abs: 5 },
+  { in: 'Show Cap. 5 1080p', title: 'Show', season: null, episode: 5, abs: 5 },
+  { in: 'Show T01E05 1080p', title: 'Show', season: 1, episode: 5 },
+  { in: 'Show T1 EP5 720p', title: 'Show', season: 1, episode: 5 },
+  { in: 'Tokyo Revengers T2 E5', title: 'Tokyo Revengers', season: 2, episode: 5 },
   { in: 'Movie Name 1920x1080', title: 'Movie Name', year: null, quality: '1080p' },
   { in: '1920x1080 Movie Name', title: 'Movie Name', year: null, quality: '1080p' },
   { in: 'Anime Title - 01v2 [1080p]', type: 'anime', episode: 1 },
@@ -68,6 +74,40 @@ const cases = [
   { in: 'A Limited Series S01E01 1080p', title: 'A Limited Series', season: 1, episode: 1 },
   { in: 'Some Title', type: 'movie', title: 'Some Title' },
   { in: '', title: '' },
+
+  // --- Grupos de release sin corchetes ------------------------------------
+  { in: 'Anime Time One Piece 1080p', type: 'anime', title: 'One Piece', group: 'Anime Time', audio: ['english', 'japanese'], subs: ['english'] },
+  { in: 'Anime Pahe: Jujutsu Kaisen Season 2 Episode 5', type: 'anime', title: 'Jujutsu Kaisen', season: 2, episode: 5, group: 'Anime Pahe', subs: ['english'] },
+  { in: 'Erai-raws - One Piece - 1075 1080p', type: 'anime', title: 'One Piece', episode: 1075, group: 'Erai-raws' },
+  // …pero las palabras que también son nombres de grupo y de uso común no se recortan:
+  { in: 'Judas and the Black Messiah 2021 1080p', title: 'Judas and the Black Messiah', year: 2021 },
+  // "T-34" y "9-1-1" no deben leerse como notación de temporada/episodio.
+  { in: 'T-34 2018 1080p', type: 'movie', title: 'T-34', year: 2018 },
+  { in: '9-1-1 S06E01 1080p', type: 'series', title: '9-1-1', season: 6, episode: 1 },
+  { in: 'Edge of Tomorrow 2014 1080p', title: 'Edge of Tomorrow', year: 2014 },
+  { in: 'Sam: A Saxon S01E01 1080p', title: 'Sam: A Saxon', season: 1, episode: 1 },
+  { in: 'Yuri!!! on Ice - 01 1080p', title: 'Yuri!!! on Ice', episode: 1 },
+  { in: 'Hakata Ramen Something 2020', title: 'Hakata Ramen Something', year: 2020 },
+  { in: 'Anime Land 2020 1080p', title: 'Anime Land', year: 2020 },
+
+  // --- Ruido de webs vs. palabras reales del título ----------------------
+  { in: 'Free Guy 2021 1080p', title: 'Free Guy', year: 2021 },
+  { in: 'Free Solo 2018 1080p', title: 'Free Solo', year: 2018 },
+  { in: 'Free Birds 2013 1080p', title: 'Free Birds', year: 2013 },
+  { in: 'Born Free 1966 1080p', title: 'Born Free', year: 1966 },
+  { in: 'The Free 2015', title: 'The Free' },
+  { in: 'Dual (2022) 1080p WEB-DL', title: 'Dual', year: 2022, source: 'web-dl' },
+  { in: 'Dual 2022 1080p', title: 'Dual', year: 2022 },
+  { in: 'Mi Pelicula 2020 1080p Latino', title: 'Mi Pelicula', year: 2020, audio: ['latino'] },
+  { in: 'La Pelicula 2020 1080p', title: 'La Pelicula', year: 2020 },
+  { in: 'Pelicula 2020 1080p', title: 'Pelicula', year: 2020 },
+  // Recortar los dos extremos a la vez dejaría "X": se conserva y se quita sólo "Torrent".
+  { in: 'Pelicula X Torrent', title: 'Pelicula X' },
+  // …y el ruido de webs sigue eliminándose cuando el título sobrevive.
+  { in: 'Descargar Pelicula Batman 2022 1080p', title: 'Batman', year: 2022 },
+  { in: 'Batman Online 2022 1080p', title: 'Batman', year: 2022 },
+  { in: 'Ver Online El Conde 2023 1080p', title: 'El Conde', year: 2023 },
+  { in: 'Movie Name Torrent 2019 1080p', title: 'Movie Name', year: 2019 },
 ];
 
 for (const c of cases) {
@@ -109,6 +149,19 @@ test('buildSearchVariants: recorta subtítulo tras ":"', () => {
 
 test('parseTitle: searchKey normaliza acentos y artículos', () => {
   assert.equal(parseTitle('El Señor de los Anillos (2001) 1080p').searchKey, 'senor de anillos');
+});
+
+test('parseTitle: el título limpio nunca queda vacío ni mutilado', () => {
+  // Regresión: la limpieza de ruido de webs recortaba títulos reales.
+  const titles = [
+    'Free Guy 2021 1080p', 'Dual (2022) 1080p', 'Mi Pelicula 2020 1080p', 'La Pelicula 2020 1080p',
+    'Born Free 1966 1080p', 'The Free 2015', 'Pelicula 2020 1080p', 'Online 2018 1080p',
+    'Torrent 2022 1080p', 'Gratis 2019 720p', 'Download 2020 1080p',
+  ];
+  for (const t of titles) {
+    const p = parseTitle(t);
+    assert.ok(p.cleanTitle.length >= 2, `"${t}" → cleanTitle vacío o de un solo carácter (${JSON.stringify(p.cleanTitle)})`);
+  }
 });
 
 test('parseTitle: nunca lanza con basura', () => {

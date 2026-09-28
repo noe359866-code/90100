@@ -27,6 +27,8 @@ export const ANIME_GROUPS = new Map(Object.entries({
   'asw': JP_EN,
   'anime time': DUAL_EN,
   'animetime': DUAL_EN,
+  'anime pahe': JP_EN,
+  'animepahe': JP_EN,
   'dkb': JP_EN,
   'kametsu': DUAL_EN,
   'yameii': DUAL_EN,
@@ -150,13 +152,18 @@ export const ANIME_GROUPS = new Map(Object.entries({
   'animejl': JP_LAT,
 }));
 
+/** Clave canónica de un nombre de grupo (minúsculas, sin "!" final, espacios simples). */
+export function normalizeAnimeGroupKey(name) {
+  return String(name ?? '').trim().toLowerCase().replace(/!+$/, '').replace(/\s+/g, ' ');
+}
+
 /**
  * Busca el perfil de un grupo por nombre (tolerante a mayúsculas, "!" y
  * sufijos como " Subs"). Devuelve `null` si es desconocido.
  */
 export function lookupAnimeGroup(name) {
   if (!name) return null;
-  const key = String(name).trim().toLowerCase().replace(/!+$/, '').replace(/\s+/g, ' ');
+  const key = normalizeAnimeGroupKey(name);
   if (ANIME_GROUPS.has(key)) return { name: key, ...ANIME_GROUPS.get(key) };
 
   // Variantes: "Erai-raws (Multi)" → "erai-raws"; "SubsPlease Subs" → "subsplease"

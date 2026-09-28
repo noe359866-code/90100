@@ -117,3 +117,89 @@ test('updateRows: respeta config.updateChunkSize al llamar a la RPC', async () =
   await db2.updateRows(updates, 'test');
   assert.equal(s2.rpcCalls, 3, '450 updates a 200/lote = 3 llamadas');
 });
+
+/**
+ * Cliente mínimo donde una lista de ids es "protegida": el DELETE las acepta pero
+ * PostgREST devuelve un `count` menor y las filas siguen ahí (simula RLS/triggers
+ * que permiten SELECT pero bloquean DELETE).
+ */
+function partialDeleteClient(protectedIds) {
+  const rows = Array.from({ length: 12 }, (_, i) => ({ id: i + 1, title: `Fila ${i + 1}` }));
+  const state = { after: null, limit: null };
+  const stats = { selectCalls: 0, deleteCalls: 0, deletedIds: [] };
+  const run = (mode, ids) => {
+    if (mode === 'delete') {
+      stats.deleteCalls += 1;
+      const removable = ids.filter((id) => !protectedIds.has(id));
+      for (const id of removable) {
+        const idx = rows.findIndex((r) => r.id === id);
+        if (idx >= 0) rows.splice(idx, 1);
+        stats.deletedIds.push(id);
+      }
+      return { data: null, error: null, count: removable.length };
+    }
+    stats.selectCalls += 1;
+    const data = rows.filter((r) => state.after === null || r.id > state.after).slice(0, state.limit).map((r) => ({ ...r }));
+    return { data, error: null, count: null };
+  };
+  const query = (mode, ids) => {
+    const promise = Promise.resolve().then(() => run(mode, ids));
+    promise.then = promise.then.bind(promise);
+    return promise;
+  };
+  const from = () => {
+    const q = {
+      select: () => q,
+      order: () => q,
+      limit: (n) => { state.limit = n; return q; },
+      gt: (_col, value) => { state.after = value; return q; },
+      delete: () => ({ in: (_col, ids) => query('delete', ids) }),
+      then: (resolve, reject) => query('select').then(resolve, reject),
+    };
+    return q;
+  };
+  return { client: { from }, stats, rows };
+}
+
+test('deleteWhere: un lote que no se puede borrar entero no bloquea al resto', async () => {
+  // ids 1..4 "protegidos": antes el bucle se atascaba reintentando el mismo lote
+  // y dejaba sin borrar el resto de la tabla.
+  const { client, stats, rows } = partialDeleteClient(new Set([1, 2, 3, 4]));
+  const db = createDb({
+    table: 'torrents', dryRun: false, deleteChunkSize: 4, pageSize: 50,
+    supabaseUrl: 'http://example.invalid', supabaseKey: 'test',
+  }, { client });
+  const deleted = await db.deleteWhere((q) => q, 'test');
+  assert.equal(deleted, 8, 'se borran las 8 filas que sí se pueden borrar');
+  assert.deepEqual(rows.map((r) => r.id), [1, 2, 3, 4], 'las protegidas se quedan');
+  assert.deepEqual([...stats.deletedIds].sort((a, b) => a - b), [5, 6, 7, 8, 9, 10, 11, 12]);
+  // El cursor avanza tras el lote bloqueado: ni se reintenta ni se reenvían ids ya descartados.
+  assert.equal(stats.deleteCalls, 3, `sin reintentos inútiles del lote bloqueado (${stats.deleteCalls} DELETEs)`);
+  assert.equal(stats.selectCalls, 4);
+});
+
+test('deleteWhere: si el mismo lote vuelve a salir sin progresar, se corta', async () => {
+  // El SELECT siempre devuelve lo mismo (cursor que no avanza) → red de seguridad.
+  const rows = [{ id: 1 }, { id: 2 }];
+  let selects = 0;
+  const client = {
+    from: () => {
+      const q = {
+        select: () => q, order: () => q, limit: () => q, gt: () => q,
+        delete: () => ({ in: () => Promise.resolve({ data: null, error: null, count: 0 }) }),
+        then: (resolve) => {
+          selects += 1;
+          return Promise.resolve({ data: rows.map((r) => ({ ...r })), error: null }).then(resolve);
+        },
+      };
+      return q;
+    },
+  };
+  const db = createDb({
+    table: 'torrents', dryRun: false, deleteChunkSize: 2, pageSize: 50,
+    supabaseUrl: 'http://example.invalid', supabaseKey: 'test',
+  }, { client });
+  const deleted = await db.deleteWhere((q) => q, 'test');
+  assert.equal(deleted, 0);
+  assert.equal(selects, 4, `no se repite el mismo lote sin fin (${selects} SELECTs)`);
+});
