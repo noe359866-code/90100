@@ -5,18 +5,30 @@
  *   1. Se agrupan por obra (tipo + título limpio + año [+ temporada en anime])
  *      para hacer UNA sola consulta por obra, no por torrent.
  *   2. Si algún torrent del grupo ya tiene un ID, se propaga al resto sin llamar a la API.
- *   3. Anime  → TMDB primero (es la API con más cuota) con las variantes del parser
- *              → tmdb_id; después AniList (GraphQL) → anilist_id + mal_id y Kitsu
- *              (mappings anilist→kitsu / mal→kitsu o búsqueda por texto) → kitsu_id.
- *              Si TMDB no encontró match, se reintenta al final con los títulos
- *              canónicos de AniList/Kitsu → imdb_id vía external_ids del tmdb_id.
- *              Si AniList está saturado (429) o no encuentra la obra, Kitsu resuelve por
- *              texto y sus mappings rescatan anilist_id/mal_id; TMDB ya habrá resuelto.
- *      Movie/Series → TMDB search → tmdb_id → external_ids → imdb_id.
+ *   3. Cada obra se resuelve por la vía MÁS BARATA y EXACTA disponible:
+ *      · `imdb_id` ya guardado      → `/find` de TMDB (1 llamada, sin homónimos).
+ *      · otro ID externo ya guardado → mappings de Kitsu (anilist↔kitsu↔mal): son
+ *        referencias cruzadas exactas y evitan gastar cuota de AniList.
+ *      · sin nada                 → búsqueda por título, en este orden:
+ *          Anime  → TMDB (20 req/s) → tmdb_id; AniList (GraphQL, 20 req/min, el
+ *                   recurso más escaso: 3 s por consulta) → anilist_id + mal_id;
+ *                   Kitsu (90 req/min) → kitsu_id y, con sus mappings, rescata
+ *                   anilist_id/mal_id si AniList dio 429 o no encontró la obra.
+ *                   Si TMDB no encontró con las variantes, se reintenta con los
+ *                   títulos canónicos de AniList/Kitsu → imdb_id vía external_ids.
+ *          Movie/Series → TMDB search → tmdb_id → external_ids → imdb_id.
  *   4. Cada match se valida por similitud de título (+ año) para evitar falsos positivos.
+ *   5. Temporadas: AniList/Kitsu tienen ficha POR TEMPORADA, así que con
+ *      `season > 1` sólo se pregunta por las variantes que identifican la
+ *      temporada ("Título 2nd Season"). TMDB sí usa el título pelado porque su
+ *      `tmdb_id` es por serie. Sin esto, una T2 se quedaba con la ficha de la T1
+ *      (metadatos equivocados en Stremio y riesgo de que la deduplicación
+ *      agrupara temporadas distintas).
  *
  * `ENRICH_MAX_LOOKUPS` limita las obras resueltas por ejecución (las que más
  * torrents desbloquean primero), para respetar rate-limits y el tiempo del job.
+ * Coste por obra (medido con clientes instrumentados): ~3 llamadas de búsqueda;
+ * con IDs previos, 1-2 mappings exactos y CERO consultas de AniList.
  */
 import { parseTitle, buildSearchVariants } from '../parser/titleParser.js';
 import { createAniListClient } from '../apis/anilist.js';
@@ -99,6 +111,12 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   const need = (f) => group.needed.has(f) && isMissing(known[f]) && isMissing(found[f]);
   const minSimilarity = config.enrich.minSimilarity;
   const variants = group.variants;
+  /**
+   * AniList/Kitsu/MAL identifican la TEMPORADA: en una obra de temporada > 1 se
+   * pregunta sólo por las variantes de temporada ("Título 2nd Season"...). El
+   * título pelado se reserva para TMDB, donde el id es por serie.
+   */
+  const seasonalVariants = group.seasonalVariants?.length ? group.seasonalVariants : variants;
   const year = group.year;
   // Un 429 no debe tirar los IDs que ya encontramos en otra API.
   const guard = async (fn) => {
@@ -114,17 +132,44 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
   };
 
   if (group.type === 'anime') {
-    // --- TMDB (1ª pasada, sólo con las variantes del parser) ---
+    // --- TMDB (1ª pasada) ---
     // TMDB va primero: es la API con más cuota (20 req/s frente a las 20 req/min
     // de AniList) y así tmdb_id/imdb_id no esperan en la cola de AniList. Si con
     // las variantes del parser no hay match, al final se reintenta con los títulos
     // canónicos de AniList/Kitsu (2ª pasada), que era la ventaja del orden antiguo.
+    //
+    // Dos caminos, del más barato/exacto al más caro/difuso:
+    //   1. `imdb_id` ya guardado + `/find` de TMDB → tmdb_id exacto en UNA llamada,
+    //      sin búsqueda por texto (ni homónimos ni dependencia del idioma del título).
+    //   2. búsqueda por variantes del parser + año.
     let englishTitle = null;
     let kitsuTitle = null;
     let tmdbId = known.tmdb_id || null;
     let kind = 'tv';
     let kindKnown = false;
     const tmdbWanted = Boolean(tmdb) && (need('tmdb_id') || need('imdb_id'));
+
+    // Atajo exacto: referencia imdb → tmdb. Si el atajo falla por cualquier motivo
+    // (TMDB cambia de forma, error raro...), la búsqueda por texto sigue siendo el
+    // plan B: perder la obra por un fallo del atajo no tendría sentido.
+    const knownImdb = cleanImdbId(known.imdb_id);
+    if (tmdb && !tmdbId && need('tmdb_id') && knownImdb && typeof tmdb.findByImdb === 'function') {
+      let hit;
+      try {
+        hit = await guard(() => tmdb.findByImdb(knownImdb, { preferKind: null }));
+      } catch (err) {
+        log.warn(`TMDB: no se pudo resolver "${group.label}" por imdb_id (${err.message}); se busca por título`);
+      }
+      if (hit?.tmdb_id) {
+        tmdbId = hit.tmdb_id;
+        kind = hit.kind || kind;
+        kindKnown = true;
+        credit('tmdb', hit.score);
+        found.tmdb_id = tmdbId;
+        log.debug(`TMDB ✓ \"${group.label}\" → ${kind}/${tmdbId} (por imdb_id exacto, sin búsqueda)`);
+      }
+    }
+
     const tryTmdb = async (extraTitles) => {
       if (!tmdb || tmdbId || !need('tmdb_id')) return;
       const tmdbVariants = extraTitles.length ? [...new Set([...extraTitles, ...variants])] : variants;
@@ -138,71 +183,97 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
         kindKnown = true;
         credit('tmdb', hit.score);
         found.tmdb_id = tmdbId;
-        log.debug(`TMDB ✓ "${group.label}" → ${kind}/${tmdbId} (${hit.title} ${hit.year ?? ''}, score ${hit.score.toFixed(2)})`);
+        log.debug(`TMDB ✓ \"${group.label}\" → ${kind}/${tmdbId} (${hit.title} ${hit.year ?? ''}, score ${hit.score.toFixed(2)})`);
       }
     };
     if (tmdbWanted) await tryTmdb([]);
 
+    /**
+     * Vía Kitsu. Dos modos:
+     *  - `mapping`: ya conocemos un id externo (mal/anilist/kitsu) → los mappings
+     *    de Kitsu son una referencia EXACTA (1-2 llamadas) y no hace falta la
+     *    búsqueda por texto.
+     *  - `search`: no sabemos nada de la obra → búsqueda por título y, si hay
+     *    suerte, mappings para rescatar anilist_id/mal_id.
+     * @returns {Promise<boolean>} true si ya no hay nada más que pedirle a Kitsu
+     */
+    const runKitsu = async ({ allowSearch }) => {
+      if (need('kitsu_id') || need('anilist_id') || need('mal_id')) {
+        const anilistId = known.anilist_id || found.anilist_id;
+        const malId = known.mal_id || found.mal_id;
+        let kitsuId = isMissing(known.kitsu_id) ? null : Number(known.kitsu_id);
+        let hit = null;
+        if (!kitsuId && need('kitsu_id')) {
+          // Mappings exactos antes que búsqueda por texto: son más fiables y no
+          // consumen cuota de AniList.
+          kitsuId = anilistId ? await guard(() => kitsu.byAniListId(anilistId)) : null;
+          if (!kitsuId && malId) kitsuId = await guard(() => kitsu.byMalId(malId));
+          if (!kitsuId && allowSearch) {
+            const kitsuVariants = englishTitle ? [...new Set([...seasonalVariants, englishTitle])] : seasonalVariants;
+            hit = (await guard(() => kitsu.findBest(kitsuVariants, { year, minSimilarity }))) ?? null;
+            kitsuId = hit?.kitsu_id ?? null;
+            kitsuTitle = hit?.title ?? null;
+          }
+          if (kitsuId) {
+            found.kitsu_id = kitsuId;
+            // El mapping exacto no tiene score; la búsqueda por texto sí.
+            credit('kitsu', hit?.score ?? null);
+          }
+          log.debug(`Kitsu ${kitsuId ? '✓ ' + kitsuId : '✗'} \"${group.label}\"`);
+        }
+        // Los mappings de la entrada de Kitsu (anilist/anime, myanimelist/anime)
+        // rellenan los IDs que aún falten: es una referencia cruzada real, no una
+        // búsqueda aproximada.
+        if (kitsuId && (need('anilist_id') || need('mal_id')) && typeof kitsu.externalIds === 'function') {
+          const ext = await guard(() => kitsu.externalIds(kitsuId));
+          const rescued = [];
+          if (ext?.anilist_id && need('anilist_id')) {
+            found.anilist_id = ext.anilist_id;
+            credit('kitsu');
+            rescued.push(`anilist=${ext.anilist_id}`);
+          }
+          if (ext?.mal_id && need('mal_id')) {
+            found.mal_id = ext.mal_id;
+            credit('kitsu');
+            rescued.push(`mal=${ext.mal_id}`);
+          }
+          if (rescued.length) log.debug(`Kitsu mappings ✓ \"${group.label}\" → ${rescued.join(' ')}`);
+        }
+      }
+      return !(need('kitsu_id') || need('anilist_id') || need('mal_id'));
+    };
+
+    // Si ya conocemos algún ID externo, la vía barata y exacta va PRIMERO: así
+    // muchas obras de anime se resuelven sin gastar una sola llamada de AniList
+    // (20 req/min, el recurso más escaso del job). Con la obra "anónima" se
+    // mantiene el orden de siempre: AniList (búsqueda) y después Kitsu.
+    //
+    // La búsqueda por texto de Kitsu sólo se permite aquí si TMDB no encontró
+    // nada: en ese caso su título canónico es lo que permite el reintento de TMDB
+    // (2ª pasada). Si TMDB ya resolvió, no se gasta ninguna llamada de más.
+    const knownExternalId = !isMissing(known.kitsu_id) || !isMissing(known.anilist_id) || !isMissing(known.mal_id);
+    const kitsuDone = knownExternalId ? await runKitsu({ allowSearch: tmdbWanted && !tmdbId }) : false;
+
     // --- AniList ---
     // Si AniList nos ha cerrado el grifo por rate limit, no insistimos: esa obra
     // se queda sin resolver y se reintentará en la próxima ejecución.
-    const anilistBlocked = anilist?.stats?.().disabled === true;
-    if (anilistBlocked) rateLimited = true;
-    if (!anilistBlocked && (need('anilist_id') || need('mal_id'))) {
-      const hit = await guard(() => anilist.findBest(variants, { year, minSimilarity }));
+    const anilistBlocked = !anilist || anilist.stats?.().disabled === true;
+    if (!kitsuDone && anilistBlocked) rateLimited = rateLimited || Boolean(anilist);
+    if (anilist && !kitsuDone && !anilistBlocked && (need('anilist_id') || need('mal_id'))) {
+      const hit = await guard(() => anilist.findBest(seasonalVariants, { year, minSimilarity }));
       if (hit) {
         if (need('anilist_id')) found.anilist_id = hit.anilist_id;
         if (need('mal_id') && hit.mal_id) found.mal_id = hit.mal_id;
         englishTitle = hit.englishTitle;
         credit('anilist', hit.score);
-        log.debug(`AniList ✓ "${group.label}" → ${hit.anilist_id} (${hit.title}, score ${hit.score.toFixed(2)})`);
+        log.debug(`AniList ✓ \"${group.label}\" → ${hit.anilist_id} (${hit.title}, score ${hit.score.toFixed(2)})`);
       } else if (!rateLimited) {
-        log.debug(`AniList ✗ "${group.label}"`);
+        log.debug(`AniList ✗ \"${group.label}\"`);
       }
     }
-    // --- Kitsu ---
-    // No se salta aunque AniList esté en pausa: Kitsu resuelve kitsu_id y, con
-    // sus mappings, puede rescatar también anilist_id/mal_id cuando AniList da
-    // 429 o no encuentra la obra.
-    if (need('kitsu_id') || need('anilist_id') || need('mal_id')) {
-      const anilistId = known.anilist_id || found.anilist_id;
-      const malId = known.mal_id || found.mal_id;
-      let kitsuId = isMissing(known.kitsu_id) ? null : Number(known.kitsu_id);
-      if (!kitsuId && need('kitsu_id')) {
-        kitsuId = anilistId ? await guard(() => kitsu.byAniListId(anilistId)) : null;
-        if (!kitsuId && malId) kitsuId = await guard(() => kitsu.byMalId(malId));
-        let hit = null;
-        if (!kitsuId) {
-          hit = (await guard(() => kitsu.findBest(englishTitle ? [...variants, englishTitle] : variants, { year, minSimilarity }))) ?? null;
-          kitsuId = hit?.kitsu_id ?? null;
-          kitsuTitle = hit?.title ?? null;
-        }
-        if (kitsuId) {
-          found.kitsu_id = kitsuId;
-          // El mapping exacto no tiene score; la búsqueda por texto sí.
-          credit('kitsu', hit?.score ?? null);
-        }
-        log.debug(`Kitsu ${kitsuId ? '✓ ' + kitsuId : '✗'} "${group.label}"`);
-      }
-      // Fallback contra el rate limit de AniList: los mappings de la entrada de
-      // Kitsu (anilist/anime, myanimelist/anime) rellenan los IDs que AniList no
-      // pudo darnos (429, penalty box o simplemente sin match).
-      if (kitsuId && (need('anilist_id') || need('mal_id')) && typeof kitsu.externalIds === 'function') {
-        const ext = await guard(() => kitsu.externalIds(kitsuId));
-        const rescued = [];
-        if (ext?.anilist_id && need('anilist_id')) {
-          found.anilist_id = ext.anilist_id;
-          credit('kitsu');
-          rescued.push(`anilist=${ext.anilist_id}`);
-        }
-        if (ext?.mal_id && need('mal_id')) {
-          found.mal_id = ext.mal_id;
-          credit('kitsu');
-          rescued.push(`mal=${ext.mal_id}`);
-        }
-        if (rescued.length) log.debug(`Kitsu mappings ✓ "${group.label}" → ${rescued.join(' ')} (fallback)`);
-      }
-    }
+    // --- Kitsu (búsqueda por texto), si no se hizo antes ---
+    if (!kitsuDone) await runKitsu({ allowSearch: true });
+
     // --- TMDB (2ª pasada, con los títulos canónicos si los hay) ---
     if (tmdbWanted && (englishTitle || kitsuTitle)) {
       await tryTmdb([englishTitle, kitsuTitle].filter(Boolean));
@@ -222,6 +293,25 @@ export async function resolveWork(group, { anilist, kitsu, tmdb, config, log }) 
     let kind = group.type === 'movie' ? 'movie' : 'tv';
     let kindKnown = false;
     let tmdbId = known.tmdb_id || null;
+    // Atajo exacto por imdb_id: una sola llamada y sin homónimos posibles. Si el
+    // atajo falla, se sigue con la búsqueda por texto (plan B).
+    const knownImdb = cleanImdbId(known.imdb_id);
+    if (!tmdbId && need('tmdb_id') && knownImdb && typeof tmdb.findByImdb === 'function') {
+      let hit;
+      try {
+        hit = await guard(() => tmdb.findByImdb(knownImdb, { preferKind: group.type === 'movie' ? 'movie' : 'tv' }));
+      } catch (err) {
+        log.warn(`TMDB: no se pudo resolver "${group.label}" por imdb_id (${err.message}); se busca por título`);
+      }
+      if (hit?.tmdb_id) {
+        tmdbId = hit.tmdb_id;
+        kind = hit.kind || kind;
+        kindKnown = true;
+        found.tmdb_id = tmdbId;
+        credit('tmdb', hit.score);
+        log.debug(`TMDB ✓ "${group.label}" → ${kind}/${tmdbId} (por imdb_id exacto, sin búsqueda)`);
+      }
+    }
     if (!tmdbId && need('tmdb_id')) {
       let hit = await guard(() => tmdb.findBest(kind, variants, { year, minSimilarity }));
       // Tipo inferido por el parser (filas sin `type` en la BD): si el tipo
@@ -369,6 +459,12 @@ export async function runEnricher(db, config, log, deps = {}) {
           seasonKey,
           label: parsed.cleanTitle + (parsed.year ? ` (${parsed.year})` : '') + (seasonKey ? ` S${seasonKey}` : ''),
           variants: buildSearchVariants(parsed),
+          /**
+           * Variantes que identifican la temporada (sólo anime con temporada > 1).
+           * AniList/Kitsu tienen ficha POR TEMPORADA: con el título pelado
+           * devolverían la ficha de otra temporada. TMDB no las usa (su id es por serie).
+           */
+          seasonalVariants: buildSearchVariants(parsed, { onlySeason: true }),
           year: parsed.year,
           hasEpisode: parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null,
           known: {},
@@ -419,6 +515,7 @@ export async function runEnricher(db, config, log, deps = {}) {
       if (g === base) continue;
       base.rows.push(...g.rows);
       base.variants = [...new Set([...base.variants, ...g.variants])];
+      base.seasonalVariants = [...new Set([...(base.seasonalVariants ?? []), ...(g.seasonalVariants ?? [])])];
       for (const f of g.needed) base.needed.add(f);
       for (const [f, v] of Object.entries(g.known)) if (isMissing(base.known[f])) base.known[f] = v;
       if (g.hasEpisode) base.hasEpisode = true;

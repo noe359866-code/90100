@@ -752,17 +752,33 @@ export function parseTitle(rawTitle) {
 /**
  * Variantes de título para consultar APIs (de más específica a más genérica).
  * Para anime con temporada > 1 se prueba "Título 2nd Season" antes que "Título".
+ *
+ * @param {object} parsed
+ * @param {{ onlySeason?: boolean }} [opts] `onlySeason`: devolver SÓLO las
+ *   variantes que identifican la temporada. Necesario en APIs con ficha **por
+ *   temporada** (AniList, Kitsu, MAL): preguntar por el título pelado en una obra
+ *   de temporada 2 devuelve la ficha de la temporada 1 (título idéntico, año sin
+ *   penalización suficiente) y el ID equivocado acaba en la BD —y en la
+ *   deduplicación, que agrupa por ese ID—. TMDB no lo usa porque su `tmdb_id` es
+ *   por SERIE y ahí el título pelado es justo el acierto correcto.
+ *   Si no hay variantes de temporada, se devuelve la lista normal (nunca vacía).
  */
-export function buildSearchVariants(parsed) {
+export function buildSearchVariants(parsed, { onlySeason = false } = {}) {
   const variants = [];
   const t = parsed.cleanTitle;
   if (!t) return variants;
-  if (parsed.isAnime && parsed.season && parsed.season > 1) {
+  // Con `onlySeason` no miramos `isAnime`: quien pide variantes de temporada es
+  // AniList/Kitsu (sólo se usan con obras de tipo anime) y el parser no siempre
+  // marca `isAnime` en un título de temporada sin tag de fansub ("Show Season 2").
+  const seasonal = [];
+  if (parsed.season && parsed.season > 1 && (onlySeason || parsed.isAnime)) {
     const ord = ['', '', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'][parsed.season] || `${parsed.season}th`;
-    variants.push(`${t} ${ord} Season`);
-    variants.push(`${t} Season ${parsed.season}`);
-    variants.push(`${t} ${parsed.season}`);
+    seasonal.push(`${t} ${ord} Season`);
+    seasonal.push(`${t} Season ${parsed.season}`);
+    seasonal.push(`${t} ${parsed.season}`);
   }
+  if (onlySeason && seasonal.length) return [...new Set(seasonal)];
+  variants.push(...seasonal);
   variants.push(t);
   // Sin subtítulo tras ":" o " - " (p. ej. "Frieren: Beyond Journey's End" → "Frieren")
   const short = t.split(/\s[:\-–—]\s|:\s/)[0].trim();

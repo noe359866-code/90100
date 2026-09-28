@@ -12,7 +12,7 @@ Está pensado para ejecutarse en **GitHub Actions** de forma programada.
 | 2 | `size`      | Borra fakes: `movie` < 150 MB, `series`/`anime` < 30 MB (umbrales configurables; ignora tamaño 0/NULL por defecto). |
 | 3 | `dead`      | Borra torrents con `seeders = 0` y `updated_at` con más de 30 días. |
 | 4/5 | `normalize` | Parser inteligente sobre `title` → `title_text` (título limpio), `type`, `season`/`episode`/`absolute_episode`, `codec`, `quality`; arrays `audio`/`subtitles` en minúsculas, canónicos, sin duplicados ni basura. |
-| 6 | `enrich`    | Para huérfanos: **TMDB primero** (si hay API key) → `tmdb_id` + `imdb_id`; en anime después AniList (GraphQL) + Kitsu → `anilist_id`, `mal_id`, `kitsu_id`. Una consulta por obra, no por torrent; validación por similitud de título + año. Si TMDB no encuentra el anime con las variantes del parser, reintenta al final con el título canónico de AniList/Kitsu. Si AniList está saturado (429), Kitsu y TMDB resuelven igualmente (los IDs de AniList/MAL se rescatan vía mappings de Kitsu). |
+| 6 | `enrich`    | Para huérfanos: **la vía más barata primero**. Si la fila ya trae `imdb_id`, TMDB `/find` da el `tmdb_id` exacto en 1 llamada (sin homónimos); si ya trae otro ID externo, los mappings de Kitsu (anilist↔kitsu↔mal) dan el resto sin gastar cuota de AniList. Sin IDs: **TMDB primero** (si hay API key) → `tmdb_id` + `imdb_id`; en anime después AniList (GraphQL) + Kitsu → `anilist_id`, `mal_id`, `kitsu_id`. Una consulta por obra, no por torrent; validación por similitud de título + año. Si TMDB no encuentra el anime con las variantes del parser, reintenta al final con el título canónico de AniList/Kitsu. Si AniList está saturado (429), Kitsu y TMDB resuelven igualmente (los IDs de AniList/MAL se rescatan vía mappings de Kitsu). |
 | 7 | `dedupe`    | Agrupa por obra (`imdb_id` / `tmdb_id` / `anilist_id` / `kitsu_id`, unidos con union-find) + episodio y conserva **sólo el mejor `spanish` y el mejor `english`**. |
 
 Sólo se escriben en la BD las filas que realmente cambian. `DRY_RUN=true` ejecuta todo sin modificar nada.
@@ -98,6 +98,11 @@ El cliente ya se defiende solo:
   encuentra la obra, Kitsu la resuelve por búsqueda de texto y sus *mappings* rescatan
   `anilist_id` y `mal_id`. Es decir: los `429` de AniList retrasan poco, en vez de
   dejar la obra sin resolver.
+- **Vías exactas antes que búsquedas**: con 20 req/min, cada consulta de AniList
+  cuesta 3 s de job. Por eso, cuando la fila ya trae un ID se usa la referencia
+  (`/find` de TMDB para `imdb_id`, mappings de Kitsu para anilist/kitsu/mal), que
+  además es exacta: cero homónimos y, medido, **cero consultas de AniList** en esas
+  obras (1-2 llamadas a Kitsu, 90 req/min, en lugar de 3 s de cola de AniList).
 - **Sin caché de errores**: una petición fallida no se cachea, así que no envenena
   las siguientes búsquedas del mismo título.
 
@@ -133,6 +138,21 @@ Dos avisos sobre el schema de ejemplo:
 2. **`file_index`**: no se usa. Como hay un índice único sólo sobre `info_hash_clean`,
    no puede haber dos filas por torrent, así que el deduplicador por obra+episodio
    es seguro.
+
+### Temporadas: por qué AniList/Kitsu no ven el título pelado
+
+AniList, Kitsu y MAL tienen **una ficha por temporada**; TMDB tiene **una ficha por serie**
+(con las temporadas dentro). Por eso, en una obra con `season > 1`:
+
+- a AniList/Kitsu se les pregunta sólo por las variantes que identifican la temporada
+  (`Título 2nd Season`, `Título Season 2`, `Título 2`),
+- a TMDB se le pregunta también por el título pelado (es donde está la serie correcta).
+
+Sin esa distinción, una T2 podía recibir el `anilist_id` de la T1: metadatos y
+episodios equivocados en Stremio, y —peor— la deduplicación agrupa por ID, así que
+temporadas distintas podían fusionarse y borrarse torrents legítimos. Si ninguna
+variante de temporada casa, la obra se queda sin ID y se reintenta en la siguiente
+ejecución (con telemetría, `ENRICH_RECHECK_AFTER_DAYS`): es preferible a guardar un ID erróneo.
 
 ### Telemetría de IDs (`ids_checked_at`, `ids_source`, `ids_confidence`, `ids_attempts`)
 

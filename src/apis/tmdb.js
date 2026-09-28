@@ -129,6 +129,38 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
     return null;
   }
 
+  /**
+   * Resuelve una obra a partir de su `imdb_id` (`/find`). Es una referencia
+   * EXACTA: una sola llamada que no depende del idioma del título ni del año, y
+   * evita la búsqueda difusa por texto (que además puede devolver un homónimo).
+   * @returns {Promise<{ tmdb_id:number, kind:'movie'|'tv', title:string|null, year:number|null, score:number }|null>}
+   */
+  async function findByImdb(imdbId, { preferKind = null } = {}) {
+    const id = String(imdbId ?? '').trim();
+    if (!/^tt\d+$/.test(id)) return null;
+    let json;
+    try {
+      json = await get(`/find/${encodeURIComponent(id)}`, { external_source: 'imdb_id' });
+    } catch (err) {
+      if (err?.code === 'ERR_RATE_LIMITED') throw err;
+      log?.warn(`TMDB: fallo en find/${id}: ${err.message}`);
+      return null;
+    }
+    const movie = json?.movie_results?.[0] ?? null;
+    const tv = json?.tv_results?.[0] ?? null;
+    const pick = preferKind === 'movie' ? (movie || tv) : preferKind === 'tv' ? (tv || movie) : (tv || movie);
+    if (!pick) return null;
+    const isMovie = pick === movie;
+    const date = isMovie ? pick.release_date : pick.first_air_date;
+    return {
+      tmdb_id: pick.id,
+      kind: isMovie ? 'movie' : 'tv',
+      title: (isMovie ? pick.title : pick.name) || null,
+      year: date ? Number(String(date).slice(0, 4)) : null,
+      score: 1, // referencia exacta: no hay similitud que estimar
+    };
+  }
+
   /** Devuelve `{ imdb_id, tvdb_id }` de una obra TMDB. */
   async function externalIds(kind, tmdbId) {
     try {
@@ -141,5 +173,5 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
     }
   }
 
-  return { findBest, externalIds, stats: () => limiter.stats() };
+  return { findBest, findByImdb, externalIds, stats: () => limiter.stats() };
 }
