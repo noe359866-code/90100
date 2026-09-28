@@ -13,7 +13,7 @@ Está pensado para ejecutarse en **GitHub Actions** de forma programada.
 | 3 | `dead`      | Borra torrents con `seeders = 0` y `updated_at` con más de 30 días. |
 | 4/5 | `normalize` | Parser inteligente sobre `title` → `title_text` (título limpio), `type`, `season`/`episode`/`absolute_episode`, `codec`, `quality`; arrays `audio`/`subtitles` en minúsculas, canónicos, sin duplicados ni basura. |
 | 6 | `enrich`    | Para huérfanos: **la vía más barata primero**. Si la fila ya trae `imdb_id`, TMDB `/find` da el `tmdb_id` exacto en 1 llamada (sin homónimos); si ya trae otro ID externo, los mappings de Kitsu (anilist↔kitsu↔mal) dan el resto sin gastar cuota de AniList. Sin IDs: **TMDB primero** (si hay API key) → `tmdb_id` + `imdb_id`; en anime después AniList (GraphQL) + Kitsu → `anilist_id`, `mal_id`, `kitsu_id`. Una consulta por obra, no por torrent; validación por similitud de título + año. Si TMDB no encuentra el anime con las variantes del parser, reintenta al final con el título canónico de AniList/Kitsu. Si AniList está saturado (429), Kitsu y TMDB resuelven igualmente (los IDs de AniList/MAL se rescatan vía mappings de Kitsu). |
-| 7 | `dedupe`    | Agrupa por obra (`imdb_id` / `tmdb_id` / `anilist_id` / `kitsu_id`, unidos con union-find) + episodio y conserva **sólo el mejor `spanish` y el mejor `english`**. |
+| 7 | `dedupe`    | Agrupa por obra (`imdb_id` / `tmdb_id` / `anilist_id` / `kitsu_id`, unidos con union-find) + episodio y conserva **sólo el mejor `spanish` y el mejor `english`**. Si el episodio no se puede identificar, no borra nada; entre doblaje y VOSE casi empatados gana el doblaje. |
 
 Sólo se escriben en la BD las filas que realmente cambian. `DRY_RUN=true` ejecuta todo sin modificar nada.
 
@@ -237,6 +237,11 @@ score = log2(1 + seeders) × 20  +  compatibilidad
 Duplicar los seeders vale 20 puntos, por lo que la compatibilidad sólo decide entre torrents con
 seeders comparables (un CAM con 120 seeders pierde contra un BluRay con 80; con 5000 ganaría).
 
+**Doblaje vs "sólo subtítulos"**: si el mejor candidato del grupo sólo tiene el idioma en los
+subtítulos (un VOSE) y hay un doblaje a menos de 10 puntos (≈ media duplicación de seeders), se
+conserva el doblaje. Fuera de ese margen mandan los seeders: un VOSE con muchos más seeders se ve,
+y un doblaje con cuatro seeders puede que no.
+
 Grupos de idioma: **spanish** = audio castellano/latino **o** subtítulos en español; **english** =
 audio o subtítulos en inglés. Un torrent dual puede ganar ambos grupos (se conserva una sola fila).
 Los torrents sin información de idioma se asignan al grupo `DEDUP_UNKNOWN_LANGUAGE_AS` (por defecto
@@ -245,6 +250,12 @@ explícitos en otros idiomas se eliminan (`DEDUP_OTHER_LANGUAGE_POLICY=delete`) 
 Si en un grupo no queda ningún superviviente español/inglés, se conserva el mejor de todos modos:
 dos copias en francés no se borran mutuamente (una sola copia tampoco se toca). Un pack
 `S01E01-E10` no comparte clave con el episodio 1 suelto.
+
+**Cuando no se sabe el episodio, no se borra nada**: si el título no permite identificar el
+episodio (`full` en la clave interna), dos releases de la misma obra no se consideran duplicados,
+porque podrían ser dos episodios distintos. El resumen del paso lo indica:
+`dedupe: 12 filas en 3 grupos sin episodio identificable se dejan intactas`. Un `COMPLETE` o un
+pack de temporada explícitos sí se agrupan (ahí sí hay información suficiente).
 
 ## Supuestos sobre el esquema
 
