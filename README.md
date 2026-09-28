@@ -182,15 +182,15 @@ Todas las opciones están documentadas en [`.env.example`](.env.example) y `src/
 | `ENRICH_MAX_LOOKUPS` | `300` | Obras resueltas vía API por ejecución (el resto, en la siguiente) |
 | `DEDUP_OTHER_LANGUAGE_POLICY` | `delete` | `keep` para no tocar torrents en otros idiomas (francés, alemán…) |
 | `DEDUP_UNKNOWN_LANGUAGE_AS` | `english` | Grupo para torrents sin información de idioma (`english`/`spanish`/`keep`) |
-| `MAX_DELETE_RATIO` | `0.95` | Aborta un paso que quiera borrar más de ese % de filas evaluadas |
+| `MAX_DELETE_RATIO` | `0.95` | Aborta un paso que quiera borrar más de ese % de filas evaluadas (no se aplica por debajo de 10 filas evaluadas: en tablas diminutas el porcentaje es ruido) |
 
 ## El parser de títulos
 
 `src/parser/titleParser.js` es un motor RegEx tolerante a fallos. Soporta, entre otros:
 
 - **Tipo**: `anime` (grupos `[SubsPlease]`, `[Erai-raws]`, `[Judas]`, `[PuyaSubs!]`… + CRC `[A1B2C3D4]`, kanji, `OVA`, partículas romaji), `series` (hay temporada/episodio), `movie`.
-- **Episodios**: `S02E09`, `S2E9`, `S02E09-E10`, `Season 2 Episode 9`, `Temporada 2 Capítulo 9`, `2x09`, `1x01 al 1x10`, `Cap.209` (formato español), `Show 2 - 09`.
-- **Absolutos (anime)**: `- 09`, `- 1085`, `[09]`, `Ep.9`, `Episode 87`, `第09話`, `#09`, `Naruto Shippuden 297`. Con `S04E28 - 87` guarda 28 como episodio y 87 como absoluto.
+- **Episodios**: `S02E09`, `S2E9`, `S02E09-E10`, `T01E05` / `T1 EP5` (formato "temporada"), `Season 2 Episode 9`, `Temporada 2 Capítulo 9`, `2x09`, `1x01 al 1x10`, `Cap.209` (formato español), `Show 2 - 09`.
+- **Absolutos (anime)**: `- 09`, `- 1085`, `[09]`, `Ep. 9` / `Ep.9` / `Cap. 5`, `Episode 87`, `第09話`, `#09`, `Naruto Shippuden 297`. Con `S04E28 - 87` guarda 28 como episodio y 87 como absoluto.
 - **Packs**: `S01`, `S01-S03`, `Season 2`, `2nd Season`, `COMPLETE`, `Temporada Completa`.
 - **Metadatos**: año (prioriza `(2019)`; distingue *Blade Runner 2049*), 2160p/4K/1080p/720p, fuente (BluRay, WEB-DL, HDTV, CAM, TS…), códec (h264/hevc/av1/xvid), audio (aac/ac3/eac3/dts/truehd/atmos), HDR/DV, 10 bit, contenedor, grupo de release.
 - **Idiomas**: sólo analiza la zona de metadatos (no el título → *The English Patient* no es "english"), distingue Castellano/Latino, subtítulos (`VOSE`, `Sub Esp`, `[Multiple Subtitle][ENG][SPA-LA]`) y aplica perfiles por grupo de fansub.

@@ -12,15 +12,15 @@
  * activa `SIZE_FILTER_INCLUDE_ZERO=true` para incluir los ceros.
  */
 import { parseTitle } from '../parser/titleParser.js';
+import { exceedsDeleteRatio, deleteRatioError } from './guard.js';
 
 async function abortIfTooMany(db, config, label, pendingFilters, evaluatedFilters) {
   const [pending, evaluated] = await Promise.all([
     db.countWhere(pendingFilters, `${label} pending`),
     db.countWhere(evaluatedFilters, `${label} evaluated`),
   ]);
-  if (evaluated > 0 && pending / evaluated > config.maxDeleteRatio) {
-    const pct = ((pending / evaluated) * 100).toFixed(1);
-    throw new Error(`${label}: se eliminarían ${pending} de ${evaluated} filas (${pct}%), por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad.`);
+  if (exceedsDeleteRatio(pending, evaluated, config.maxDeleteRatio)) {
+    throw deleteRatioError(label, pending, evaluated, config.maxDeleteRatio);
   }
 }
 

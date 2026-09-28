@@ -59,6 +59,12 @@ const cases = [
   { in: 'A Complete Unknown (2024) 1080p BluRay', type: 'movie', title: 'A Complete Unknown', year: 2024, complete: false },
   { in: 'Show.Name.S01.Complete.1080p', type: 'series', title: 'Show Name', season: 1, pack: true, complete: true },
   { in: 'Cap.209 The Show', title: 'The Show', season: 2, episode: 9 },
+  // Notaciones con separador múltiple ("Ep." + espacio) y "Temporada" abreviada.
+  { in: 'Show Ep. 5 720p', title: 'Show', season: null, episode: 5, abs: 5 },
+  { in: 'Show Cap. 5 1080p', title: 'Show', season: null, episode: 5, abs: 5 },
+  { in: 'Show T01E05 1080p', title: 'Show', season: 1, episode: 5 },
+  { in: 'Show T1 EP5 720p', title: 'Show', season: 1, episode: 5 },
+  { in: 'Tokyo Revengers T2 E5', title: 'Tokyo Revengers', season: 2, episode: 5 },
   { in: 'Movie Name 1920x1080', title: 'Movie Name', year: null, quality: '1080p' },
   { in: '1920x1080 Movie Name', title: 'Movie Name', year: null, quality: '1080p' },
   { in: 'Anime Title - 01v2 [1080p]', type: 'anime', episode: 1 },
@@ -75,6 +81,9 @@ const cases = [
   { in: 'Erai-raws - One Piece - 1075 1080p', type: 'anime', title: 'One Piece', episode: 1075, group: 'Erai-raws' },
   // …pero las palabras que también son nombres de grupo y de uso común no se recortan:
   { in: 'Judas and the Black Messiah 2021 1080p', title: 'Judas and the Black Messiah', year: 2021 },
+  // "T-34" y "9-1-1" no deben leerse como notación de temporada/episodio.
+  { in: 'T-34 2018 1080p', type: 'movie', title: 'T-34', year: 2018 },
+  { in: '9-1-1 S06E01 1080p', type: 'series', title: '9-1-1', season: 6, episode: 1 },
   { in: 'Edge of Tomorrow 2014 1080p', title: 'Edge of Tomorrow', year: 2014 },
   { in: 'Sam: A Saxon S01E01 1080p', title: 'Sam: A Saxon', season: 1, episode: 1 },
   { in: 'Yuri!!! on Ice - 01 1080p', title: 'Yuri!!! on Ice', episode: 1 },

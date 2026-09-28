@@ -23,6 +23,7 @@
 import { parseTitle } from '../parser/titleParser.js';
 import { classifyLanguage, normalizeLanguageArray } from '../parser/languages.js';
 import { normalizeCodec, normalizeQuality } from '../parser/normalizers.js';
+import { exceedsDeleteRatio, deleteRatioError } from './guard.js';
 
 // ---------------------------------------------------------------------------
 // Union-Find para unir identificadores de la misma obra
@@ -276,8 +277,8 @@ export async function runDeduplicator(db, config, log) {
   // --- Salvaguarda ---
   const ratio = entries.length ? toDelete.length / entries.length : 0;
   log.info(`dedupe: ${scanned} filas (${skippedNoId} sin IDs ignoradas), ${groups.size} grupos obra+episodio, ${groupsWithDuplicates} con duplicados → ${toDelete.length} a eliminar (${(ratio * 100).toFixed(1)}%)`);
-  if (toDelete.length && ratio > config.maxDeleteRatio) {
-    throw new Error(`dedupe: se eliminarían ${(ratio * 100).toFixed(1)}% de las filas evaluadas, por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad (revisa con DRY_RUN=true o sube el límite).`);
+  if (exceedsDeleteRatio(toDelete.length, entries.length, config.maxDeleteRatio)) {
+    throw deleteRatioError('dedupe', toDelete.length, entries.length, config.maxDeleteRatio);
   }
 
   const deleted = await db.deleteByIds(toDelete, 'dedupe');

@@ -7,6 +7,8 @@
  * Con `DEAD_INCLUDE_NULL_SEEDERS=true` también se purgan los `seeders IS NULL`
  * (nunca se ha podido comprobar su salud) con la misma antigüedad.
  */
+import { exceedsDeleteRatio, deleteRatioError } from './guard.js';
+
 export async function runDeadPurger(db, config, log) {
   const { afterDays, includeNullSeeders } = config.dead;
   const cutoff = new Date(Date.now() - afterDays * 24 * 60 * 60 * 1000).toISOString();
@@ -19,9 +21,8 @@ export async function runDeadPurger(db, config, log) {
     db.countWhere(apply, 'dead-purger pending'),
     db.countWhere((q) => q, 'dead-purger evaluated'),
   ]);
-  if (evaluated > 0 && pending / evaluated > config.maxDeleteRatio) {
-    const pct = ((pending / evaluated) * 100).toFixed(1);
-    throw new Error(`dead-purger: se eliminarían ${pending} de ${evaluated} filas (${pct}%), por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad.`);
+  if (exceedsDeleteRatio(pending, evaluated, config.maxDeleteRatio)) {
+    throw deleteRatioError('dead-purger', pending, evaluated, config.maxDeleteRatio);
   }
 
   const deleted = await db.deleteWhere(apply, 'dead-purger');

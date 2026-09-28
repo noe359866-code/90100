@@ -10,6 +10,8 @@
  *      "Boobs" dentro de "Booby Trap", etc.).
  */
 
+import { exceedsDeleteRatio, deleteRatioError } from './guard.js';
+
 /**
  * Palabras que por sí solas marcan contenido adulto (con límite de palabra).
  *
@@ -138,9 +140,8 @@ export async function runAdultFilter(db, config, log) {
     db.countWhere((q) => q.filter('title', 'imatch', pattern), 'adult-filter pending'),
     db.countWhere((q) => q, 'adult-filter evaluated'),
   ]);
-  if (evaluated > 0 && pending / evaluated > config.maxDeleteRatio) {
-    const pct = ((pending / evaluated) * 100).toFixed(1);
-    throw new Error(`adult-filter: el prefiltro marcaría ${pending} de ${evaluated} filas (${pct}%), por encima de MAX_DELETE_RATIO=${config.maxDeleteRatio}. Abortado por seguridad.`);
+  if (exceedsDeleteRatio(pending, evaluated, config.maxDeleteRatio)) {
+    throw deleteRatioError('adult-filter (prefiltro)', pending, evaluated, config.maxDeleteRatio);
   }
 
   const deleted = await db.deleteWhere(

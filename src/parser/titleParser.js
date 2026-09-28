@@ -58,6 +58,11 @@ const EPISODE_PATTERNS = [
     map: (m) => ({ season: +m[1], episode: +m[2], episodeEnd: m[3] ? +m[3] : null }),
   },
   {
+    kind: 'txxexx', // T01E05, T1 EP05, T2 E09-E10 (notación "Temporada" de muchos trackers en español)
+    re: /(?<![A-Za-z0-9])T[ ._-]?(\d{1,2})[ ._-]*E[Pp]?[ ._-]*(\d{1,3})(?:(?:[ ._-]?E[Pp]?|-)[ ._-]?(\d{1,3}))?(?![\dp])/i,
+    map: (m) => ({ season: +m[1], episode: +m[2], episodeEnd: m[3] ? +m[3] : null }),
+  },
+  {
     kind: 'season_episode_words', // Season 2 Episode 9, Temporada 2 Capítulo 9
     re: /(?<![A-Za-z0-9])(?:Season|Temporada|Saison|Stagione|Staffel|Temp)[ ._-]*(\d{1,2})[ ._-]*(?:Episode|Episodio|Cap[ií]tulo|Cap|Ep|E)[ ._-]*(\d{1,3})(?![\dp])/i,
     map: (m) => ({ season: +m[1], episode: +m[2], episodeEnd: null }),
@@ -87,8 +92,10 @@ const ABSOLUTE_PATTERNS = [
     re: /[ ._]+[-–—][ ._]+(\d{1,4})(?:v\d)?(?=[ ._[(\-–—]|$)(?!\.\d)/g,
   },
   {
-    kind: 'word', // E09, Ep.9, Ep 9, Episode 9, Episodio 9, Capítulo 9, Cap 9
-    re: /(?<![A-Za-z0-9])(?:Episode|Episodio|Ep|E|Cap[ií]tulo|Cap|Chapter|Folge)[ ._-]?(\d{1,4})(?:v\d)?(?![\dp])/gi,
+    kind: 'word', // E09, Ep. 9, Ep 9, Episode 9, Episodio 9, Capítulo 9, Cap. 9
+    // Separadores con `*` (y no `?`): "Ep. 5" y "Cap. 5" llevan punto Y espacio,
+    // y con un solo carácter no se reconocían (el marcador quedaba en el título).
+    re: /(?<![A-Za-z0-9])(?:Episode|Episodio|Ep|E|Cap[ií]tulo|Cap|Chapter|Folge)[ ._-]*(\d{1,4})(?:v\d)?(?![\dp])/gi,
   },
   { kind: 'cjk', re: /第(\d{1,4})[話话集]/g }, // 第09話
   { kind: 'hash', re: /#(\d{1,4})(?![\dp])/g }, // #09

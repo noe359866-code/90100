@@ -40,6 +40,13 @@ const STEP_RUNNERS = {
 const fmtMs = (ms) => (ms < 1000 ? `${ms}ms` : ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${(ms / 60_000).toFixed(1)}min`);
 
 /**
+ * Etiqueta legible de un paso. `config.steps` sale de `ALL_STEPS`, así que un paso
+ * sin runner (sólo posible si se añade a la lista y se olvida el runner) no debe
+ * tumbar el resumen con un `undefined.title`.
+ */
+const stepLabel = (step) => STEP_RUNNERS[step]?.title ?? String(step);
+
+/**
  * Diagnóstico de credenciales antes de arrancar.
  * Existe porque el fallo más común es "puse el secret y sigue saliendo el aviso":
  * casi siempre es un problema de nombre o de dónde se guardó, no del código.
@@ -88,7 +95,7 @@ function writeGithubSummary(results, dbStats, totalMs) {
     const status = r.error ? '❌ error' : '✅ ok';
     const raw = r.error ? r.error : JSON.stringify(r.result);
     const detail = '`' + String(raw).replace(/[|\n\r`]/g, ' ').slice(0, 500) + '`';
-    lines.push(`| ${STEP_RUNNERS[r.step].title} | ${status} | ${fmtMs(r.ms)} | ${detail} |`);
+    lines.push(`| ${stepLabel(r.step)} | ${status} | ${fmtMs(r.ms)} | ${detail} |`);
   }
   lines.push('');
   try { appendFileSync(file, `${lines.join('\n')}\n`); } catch (err) { log.warn(`No se pudo escribir GITHUB_STEP_SUMMARY: ${err.message}`); }
@@ -140,7 +147,7 @@ async function main() {
   const totalMs = Date.now() - t0;
   log.info('================ RESUMEN ================');
   for (const r of results) {
-    log.info(`${r.error ? '✗' : '✓'} ${STEP_RUNNERS[r.step].title} (${fmtMs(r.ms)}) → ${r.error ? r.error : JSON.stringify(r.result)}`);
+    log.info(`${r.error ? '✗' : '✓'} ${stepLabel(r.step)} (${fmtMs(r.ms)}) → ${r.error ? r.error : JSON.stringify(r.result)}`);
   }
   log.info(`Totales BD: ${JSON.stringify(db.stats)} · duración ${fmtMs(totalMs)}`);
   writeGithubSummary(results, db.stats, totalMs);
