@@ -86,16 +86,37 @@ export const ALL_STEPS = [
   'dedupe',
 ];
 
+/**
+ * Interpreta `STEPS`. Si hay un paso desconocido no se lanza desde aquí: el
+ * error se guarda en `stepsError` para que `validateConfig` lo reporte con el
+ * logger (con anotación de GitHub Actions) en lugar de morir al importar el
+ * módulo con un volcado de pila.
+ * @returns {{ steps: string[], error?: string }}
+ */
 const parseSteps = (raw) => {
-  if (!raw || raw.trim().toLowerCase() === 'all') return [...ALL_STEPS];
+  if (!raw || raw.trim().toLowerCase() === 'all') return { steps: [...ALL_STEPS] };
   const wanted = raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   const unknown = wanted.filter((s) => !ALL_STEPS.includes(s));
   if (unknown.length) {
-    throw new Error(`STEPS contiene pasos desconocidos: ${unknown.join(', ')}. Válidos: ${ALL_STEPS.join(', ')}`);
+    return { steps: [...ALL_STEPS], error: `STEPS contiene pasos desconocidos: ${unknown.join(', ')}. Válidos: ${ALL_STEPS.join(', ')} (o "all")` };
   }
   // Se respeta siempre el orden canónico, independientemente del orden indicado.
-  return ALL_STEPS.filter((s) => wanted.includes(s));
+  return { steps: ALL_STEPS.filter((s) => wanted.includes(s)) };
 };
+
+const parsedSteps = parseSteps(env.STEPS);
+
+/**
+ * Avisos no fatales detectados al leer el entorno (p. ej. LOG_LEVEL mal escrito).
+ * Se registran al arrancar: antes se ignoraban en silencio y daban la impresión
+ * de que "la variable no funciona".
+ */
+const warnings = [];
+const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'silent'];
+const logLevel = (env.LOG_LEVEL || 'info').toLowerCase();
+if (!LOG_LEVELS.includes(logLevel)) {
+  warnings.push(`LOG_LEVEL="${logLevel}" no es válido (${LOG_LEVELS.join('|')}); se usará "info".`);
+}
 
 export const config = Object.freeze({
   // --- Supabase -----------------------------------------------------------
@@ -107,9 +128,13 @@ export const config = Object.freeze({
 
   // --- Ejecución ----------------------------------------------------------
   dryRun: toBool(env.DRY_RUN, false),
-  steps: parseSteps(env.STEPS),
+  steps: parsedSteps.steps,
+  /** Error de sintaxis en `STEPS` (si lo hay, `validateConfig` aborta con un mensaje claro). */
+  stepsError: parsedSteps.error ?? null,
   continueOnError: toBool(env.CONTINUE_ON_ERROR, true),
-  logLevel: (env.LOG_LEVEL || 'info').toLowerCase(),
+  logLevel,
+  /** Avisos no fatales de configuración; `index.js` los loguea al arrancar. */
+  warnings,
   pageSize: clamp(toInt(env.PAGE_SIZE, 1000), 50, 1000), // PostgREST limita a 1000 por defecto
   deleteChunkSize: clamp(toInt(env.DELETE_CHUNK_SIZE, 500), 10, 1000),
   updateConcurrency: Math.max(toInt(env.UPDATE_CONCURRENCY, 8), 1),
@@ -205,6 +230,7 @@ export function validateConfig(cfg = config) {
   const problems = [];
   if (!cfg.supabaseUrl) problems.push('SUPABASE_URL es obligatoria');
   if (!cfg.supabaseKey) problems.push('SUPABASE_SERVICE_ROLE_KEY es obligatoria');
+  if (cfg.stepsError) problems.push(cfg.stepsError);
   if (!['delete', 'keep'].includes(cfg.dedupe.otherLanguagePolicy)) {
     problems.push('DEDUP_OTHER_LANGUAGE_POLICY debe ser delete|keep');
   }

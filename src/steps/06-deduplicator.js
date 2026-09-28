@@ -28,18 +28,33 @@ import { normalizeCodec, normalizeQuality } from '../parser/normalizers.js';
 // Union-Find para unir identificadores de la misma obra
 // ---------------------------------------------------------------------------
 class UnionFind {
-  constructor() { this.parent = new Map(); }
+  constructor() {
+    this.parent = new Map();
+    /** Tamaño de cada árbol: unir el pequeño bajo el grande evita cadenas largas
+     *  (con tablas de cientos de miles de filas la diferencia se nota). */
+    this.size = new Map();
+  }
   find(x) {
-    if (!this.parent.has(x)) this.parent.set(x, x);
+    if (!this.parent.has(x)) {
+      this.parent.set(x, x);
+      this.size.set(x, 1);
+    }
     let root = x;
     while (this.parent.get(root) !== root) root = this.parent.get(root);
+    // Compresión de caminos completa.
     while (this.parent.get(x) !== root) { const next = this.parent.get(x); this.parent.set(x, root); x = next; }
     return root;
   }
   union(a, b) {
-    const ra = this.find(a);
-    const rb = this.find(b);
-    if (ra !== rb) this.parent.set(rb, ra);
+    let ra = this.find(a);
+    let rb = this.find(b);
+    if (ra === rb) return;
+    const sa = this.size.get(ra) ?? 1;
+    const sb = this.size.get(rb) ?? 1;
+    if (sa < sb) [ra, rb] = [rb, ra];
+    this.parent.set(rb, ra);
+    this.size.set(ra, sa + sb);
+    this.size.delete(rb);
   }
 }
 
@@ -146,7 +161,7 @@ function compareCandidates(a, b) {
 /**
  * Decide qué filas conservar y cuáles borrar dentro de un grupo obra+episodio.
  * Función pura (testeable).
- * @param {Array<{row:object, parsed:object, score:number, lang:object}>} candidates
+ * @param {Array<{row:object, score:number, lang:object}>} candidates
  * @param {object} dedupeConfig
  * @returns {{ keep: Set<any>, remove: any[] }}
  */
@@ -218,12 +233,13 @@ export async function runDeduplicator(db, config, log) {
       const lang = classifyLanguage({ audio, subtitles });
       const { score } = scoreTorrent(row, parsed, { seederWeight: config.dedupe.seederWeight });
 
+      // Sólo lo imprescindible: la tabla entera cabe en memoria durante el paso,
+      // así que cada campo de más se multiplica por cientos de miles de filas.
       entries.push({
         primaryId: ids[0],
         epKey: episodeKey(row, parsed),
         score,
         lang,
-        parsed: { container: parsed.container, source: parsed.source, codec: parsed.codec },
         row: { id: row.id, seeders: row.seeders, size_bytes: row.size_bytes, updated_at: row.updated_at, title: row.title },
       });
     }

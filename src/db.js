@@ -201,8 +201,12 @@ export function createDb(config, { client } = {}) {
     }
 
     let total = 0;
-    let lastId = null; // cursor keyset; sólo avanza cuando quedan filas sin borrar en el lote
-    let stagnant = 0;
+    /** Cursor keyset: sólo avanza cuando quedan filas del lote sin borrar. */
+    let lastId = null;
+    /** Red de seguridad contra un bucle sin progreso (el mismo lote una y otra vez). */
+    let previousFirstId = null;
+    let repeats = 0;
+    let partialBatches = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const { data } = await run(`${label} (select batch)`, () => {
@@ -212,6 +216,20 @@ export function createDb(config, { client } = {}) {
       });
       stats.selectCalls += 1;
       if (!data || data.length === 0) break;
+
+      // Si el lote que empieza por el mismo id vuelve a salir, nada avanza
+      // (p. ej. un trigger/RLS que permite SELECT pero no DELETE): se corta en
+      // lugar de repetirlo indefinidamente.
+      if (data[0].id === previousFirstId) {
+        repeats += 1;
+        if (repeats >= 3) {
+          log.warn(`${label}: los borrados no progresan (¿RLS, triggers o permisos?), se detiene el bucle`);
+          break;
+        }
+      } else {
+        repeats = 0;
+        previousFirstId = data[0].id;
+      }
 
       const targets = confirm ? data.filter(confirm) : data;
       let deleted = 0;
@@ -223,23 +241,22 @@ export function createDb(config, { client } = {}) {
         total += deleted;
       }
 
-      if (confirm) {
-        // Con filtro en cliente pueden quedar filas candidatas no borradas → avanzamos siempre.
-        lastId = data[data.length - 1].id;
-      } else if (deleted === 0) {
-        // Nada borrado (¿RLS/permisos?): avanzamos para no repetir el mismo lote infinitamente.
-        stagnant += 1;
-        lastId = data[data.length - 1].id;
-        if (stagnant >= 3) {
-          log.warn(`${label}: los borrados no progresan (¿RLS/permisos?), se detiene el bucle`);
-          break;
-        }
-      } else {
-        stagnant = 0; // sin cursor: las filas borradas desaparecen y el siguiente SELECT trae las siguientes
+      // El cursor avanza siempre que queden filas del lote en la tabla:
+      //  - con `confirm`, porque las descartadas en cliente nunca se borran;
+      //  - sin `confirm`, si el DELETE borró menos de las pedidas (RLS, trigger,
+      //    lock, borrado concurrente…). Si no avanzásemos, esas filas volverían a
+      //    salir en el siguiente SELECT y el resto de la tabla no se procesaría.
+      if (deleted < targets.length || confirm) lastId = data[data.length - 1].id;
+      if (!confirm && deleted < data.length) {
+        partialBatches += 1;
+        if (deleted > 0) log.debug(`${label}: ${deleted}/${data.length} borradas en el lote (el resto se queda)`);
       }
 
       if (data.length < config.deleteChunkSize) break; // era la última página de candidatos
       await sleep(25); // pequeño respiro para no saturar la BD
+    }
+    if (partialBatches > 0) {
+      log.warn(`${label}: ${partialBatches} lote(s) no se pudieron borrar por completo (¿RLS, triggers o permisos?); esas filas se reintentarán en la próxima ejecución`);
     }
     stats.deleted += total;
     return total;

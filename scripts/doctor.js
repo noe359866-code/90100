@@ -24,17 +24,21 @@ const mask = (value) => {
 const problems = [];
 
 console.log('\n=== Variables de entorno que ve el proceso ===');
-for (const [name, value] of [
+for (const [name, value, { optional = false } = {}] of [
   ['SUPABASE_URL', config.supabaseUrl],
   ['SUPABASE_SERVICE_ROLE_KEY', config.supabaseKey],
-  ['TMDB_API_KEY', config.enrich.tmdbApiKey],
+  // TMDB es opcional: sin ella sólo se enriquecen los animes (no debe fallar el doctor).
+  ['TMDB_API_KEY', config.enrich.tmdbApiKey, { optional: true }],
   ['TABLE_NAME', config.table],
   ['STEPS', config.steps.join(',')],
   ['DRY_RUN', String(config.dryRun)],
 ]) {
-  console.log(`  ${name.padEnd(26)} ${mask(value)}`);
-  if (!value) problems.push(`${name} está vacía`);
+  console.log(`  ${name.padEnd(26)} ${mask(value)}${optional && !value ? '  (opcional)' : ''}`);
+  if (!value && !optional) problems.push(`${name} está vacía`);
 }
+const warnings = [...(config.warnings ?? [])];
+if (config.stepsError) problems.push(config.stepsError);
+for (const warning of warnings) console.log(`  ! ${warning}`);
 
 console.log('\n=== Validación de TMDB ===');
 if (!config.enrich.tmdbApiKey) {
@@ -63,9 +67,12 @@ if (config.supabaseUrl && config.supabaseKey) {
 }
 
 console.log('');
+for (const warning of warnings) console.log(`  ! ${warning}`); // se repiten al final para que no pasen desapercibidos
 if (problems.length) {
-  console.log(`Resultado: ${problems.length} problema(s) detectado(s).`);
+  console.log(`Resultado: ${problems.length} problema(s) detectado(s)${warnings.length ? ` y ${warnings.length} aviso(s)` : ''}.`);
   process.exitCode = 1;
+} else if (warnings.length) {
+  console.log(`Resultado: sin problemas (${warnings.length} aviso(s) de configuración).`);
 } else {
   console.log('Resultado: todo correcto.');
 }

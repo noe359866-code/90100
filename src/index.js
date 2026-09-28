@@ -18,6 +18,7 @@
 import { appendFileSync } from 'node:fs';
 import { config, validateConfig } from './config.js';
 import { log } from './logger.js';
+import { exitSoon } from './utils/exit.js';
 import { createDb } from './db.js';
 import { tmdbKeyKind, validateTmdbKey } from './apis/tmdb.js';
 import { runAdultFilter } from './steps/01-adultFilter.js';
@@ -96,6 +97,7 @@ function writeGithubSummary(results, dbStats, totalMs) {
 async function main() {
   log.setLevel(config.logLevel);
   validateConfig(config);
+  for (const warning of config.warnings ?? []) log.warn(warning);
 
   await preflightCredentials();
 
@@ -110,7 +112,15 @@ async function main() {
   let failed = false;
 
   for (const step of config.steps) {
-    const { title, run } = STEP_RUNNERS[step];
+    const runner = STEP_RUNNERS[step];
+    if (!runner) {
+      // Sólo puede pasar si se añade un paso a ALL_STEPS sin su runner (hay test).
+      failed = true;
+      log.error(`Paso desconocido en STEP_RUNNERS: "${step}"`);
+      results.push({ step, error: `paso desconocido: ${step}`, ms: 0 });
+      continue;
+    }
+    const { title, run } = runner;
     log.group(title);
     const start = Date.now();
     try {
@@ -120,10 +130,8 @@ async function main() {
       failed = true;
       log.error(`Paso "${step}" falló: ${err.stack || err.message}`);
       results.push({ step, error: err.message, ms: Date.now() - start });
-      if (!config.continueOnError) {
-        log.groupEnd();
-        break;
-      }
+      // El `finally` cierra el grupo; cerrarlo aquí también duplicaba el ::endgroup::.
+      if (!config.continueOnError) break;
     } finally {
       log.groupEnd();
     }
@@ -140,11 +148,11 @@ async function main() {
   const code = failed ? 1 : 0;
   process.exitCode = code;
   // supabase-js / undici pueden dejar sockets abiertos y el job de Actions no termina.
-  setTimeout(() => process.exit(code), 50);
+  exitSoon(code);
 }
 
 main().catch((err) => {
   log.error(err.stack || err.message);
   process.exitCode = 1;
-  setTimeout(() => process.exit(1), 50);
+  exitSoon(1);
 });

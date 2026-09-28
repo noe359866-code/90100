@@ -24,7 +24,7 @@
  *      (episodio, temporada, año, resolución, fuente, códec, idioma inequívoco...).
  */
 
-import { lookupAnimeGroup } from './animeGroups.js';
+import { ANIME_GROUPS, lookupAnimeGroup } from './animeGroups.js';
 import { detectTitleLanguages } from './languages.js';
 import { normalizeKey } from '../utils/text.js';
 
@@ -154,6 +154,55 @@ const RE_MISC_NOISE = /(?<![A-Za-z0-9])(?:Descargar|Download|Torrent|Estreno|Ver
 const RE_MISC_NOISE_LEAD = new RegExp(`^(?:\\s*${RE_MISC_NOISE.source}[\\s._-]*)+`, 'i');
 const RE_MISC_NOISE_TRAIL = new RegExp(`(?:[\\s._-]*${RE_MISC_NOISE.source}\\s*)+$`, 'i');
 
+/**
+ * Palabras de ruido que TAMBIÉN son palabras normales de un título: "Free Guy",
+ * "Free Solo", "La Pelicula", "Born Free". Cuando la limpieza toca una de ellas
+ * se exige que lo que queda siga pareciendo un título.
+ */
+const NOISE_AMBIGUOUS_RE = /(?<![A-Za-z0-9])(?:Free|Online|Estreno|Pel[ií]culas?)(?![A-Za-z0-9])/i;
+
+/**
+ * ¿El texto restante sigue pareciendo un título? Evita recortes destructivos:
+ * "Free Guy" → "Guy", "Mi Pelicula" → "Mi", "Dual" → "".
+ * Una sola palabra muy corta es casi siempre un resto.
+ */
+export function isPlausibleTitle(text) {
+  const t = String(text ?? '').trim();
+  if (t.length < 2) return false;
+  if (/\s/.test(t)) return true; // dos o más palabras
+  return t.length >= 6; // una sola palabra: que no sea un resto ("Guy", "Mi", "La")
+}
+
+/** Quita `RE_LANG_TRAILING` sólo si el título sobrevive al recorte. */
+function stripTrailingLanguage(text) {
+  const m = RE_LANG_TRAILING.exec(text);
+  if (!m) return text;
+  const rest = text.slice(0, m.index);
+  return isPlausibleTitle(rest) ? rest : text;
+}
+
+/**
+ * Quita ruido de webs en los extremos. Ambos extremos se deciden en bloque:
+ * recortar sólo el principio puede dejar un resto peor que el original
+ * ("Pelicula X Torrent" → "X Torrent"); así se conserva y es `RE_LANG_TRAILING`
+ * la que retira después " Torrent" → "Pelicula X".
+ */
+function stripEdgeNoise(text) {
+  const lead = RE_MISC_NOISE_LEAD.exec(text);
+  const afterLead = lead ? text.slice(lead[0].length) : text;
+  const trail = RE_MISC_NOISE_TRAIL.exec(afterLead);
+  if (!lead && !trail) return text;
+  const rest = (trail ? afterLead.slice(0, trail.index) : afterLead).trim();
+  // Palabras ambiguas ("Free Guy", "Mi Pelicula") o recortar los dos extremos a
+  // la vez exigen que el resto siga pareciendo un título; con ruido inequívoco
+  // ("Descargar Pelicula Batman") basta con que no quede vacío.
+  const ambiguous = Boolean(lead && trail)
+    || Boolean(lead && NOISE_AMBIGUOUS_RE.test(lead[0]))
+    || Boolean(trail && NOISE_AMBIGUOUS_RE.test(trail[0]));
+  const acceptable = ambiguous ? isPlausibleTitle(rest) : rest.length >= 2;
+  return acceptable ? rest : text;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -164,23 +213,84 @@ const isYearLike = (numStr) => {
   return n >= 1900 && n <= CURRENT_YEAR + 1;
 };
 
+// ---------------------------------------------------------------------------
+// Grupo de release pegado al principio, sin corchetes
+// ---------------------------------------------------------------------------
+
+/** Señales de que la cadena es un release (calidad, corchetes, " - 05", "01v2"…). */
+const RE_RELEASE_SIGNAL = /(?<![A-Za-z0-9])(?:2160p|1080p|1080i|720p|576p|480p|360p|4K|UHD|FHD|WEB-?DL|WEBRip|BRRip|BD(?:Rip|Remux)|Blu-?Ray|HDTV|HEVC|AVC|x26[45]|10bit|AAC|AC3|EAC3|DTS|FLAC|Opus)(?![A-Za-z0-9])|\[[^\]]{1,80}\]|(?<![A-Za-z0-9])S\d{1,2}E\d{1,3}(?![A-Za-z0-9])|(?<![A-Za-z0-9])\d{1,4}v\d(?![A-Za-z0-9])|\s[-–—]\s*\d{1,4}(?=\s|$|[[(])/i;
+/** Palabras que por sí solas no son un título ("Season 2", "Dual Audio"). */
+const RE_META_WORDS = /(?<![A-Za-z0-9])(?:Season|Temporada|Episode|Episodio|Cap[ií]tulos?|Cap|Complete|Completa|Completo|Pack|Batch|Dual|Multi(?:ple)?|Subtitles?|Subs?|Audio|Lang(?:uage)?s?|Full)(?![A-Za-z0-9])/gi;
+const hasTitleWord = (text) => /[A-Za-z\u00C0-\u024F\u3040-\u9fff]{2}/.test(text.replace(RE_META_WORDS, ' ').replace(/\d+/g, ' '));
+
+/**
+ * Índice de nombres de grupo "inequívocos" (con espacio, guion o dígito) por su
+ * primera palabra. Los de una sola palabra ("judas", "edge", "sam", "yuri") son
+ * también palabras normales de un título y quedan fuera: reconocerlos como
+ * prefijo mutilaría "Judas and the Black Messiah", "Edge of Tomorrow" o
+ * "Yuri!!! on Ice". El índice hace que el caso normal (primera palabra desconocida)
+ * sea un simple fallo de Map, sin recorrer los 128 grupos en cada título.
+ */
+const BARE_GROUP_BY_FIRST_WORD = (() => {
+  const index = new Map();
+  for (const key of ANIME_GROUPS.keys()) {
+    if (!/[\s\-_0-9]/.test(key)) continue;
+    const first = key.split(' ')[0];
+    if (!index.has(first)) index.set(first, []);
+    index.get(first).push(key);
+  }
+  for (const list of index.values()) list.sort((a, b) => b.length - a.length);
+  return index;
+})();
+
+/**
+ * Grupo de release pegado al principio SIN corchetes: "Anime Time One Piece
+ * 1080p", "Erai-raws - Show 01", "Anime Pahe: Show". Si no hay un separador
+ * explícito se exige alguna señal de release (calidad, corchetes, " - 05"…) y
+ * que lo que queda tenga pinta de título.
+ *
+ * @returns {{name: string, profile: object, length: number}|null}
+ */
+function matchBareLeadingGroup(text) {
+  const sp = text.indexOf(' ');
+  const first = (sp === -1 ? text : text.slice(0, sp)).toLowerCase();
+  const candidates = BARE_GROUP_BY_FIRST_WORD.get(first);
+  if (!candidates) return null;
+  const lower = text.toLowerCase();
+  for (const key of candidates) {
+    if (!lower.startsWith(key)) continue;
+    const rest = text.slice(key.length);
+    const sep = /^(?:\s*[:|–—]\s*|\s+-\s+|\s+)/.exec(rest);
+    if (!sep) continue;
+    const explicit = /[:|–—]/.test(sep[0]) || /\s-\s/.test(sep[0]);
+    if (!explicit && !RE_RELEASE_SIGNAL.test(text)) continue;
+    const tail = rest.slice(sep[0].length);
+    if (!/^[A-Za-z\u00C0-\u024F\u3040-\u9fff]/.test(tail) || !hasTitleWord(tail)) continue;
+    return { name: text.slice(0, key.length), profile: { name: key, ...ANIME_GROUPS.get(key) }, length: key.length + sep[0].length };
+  }
+  return null;
+}
+
 const hasLettersBefore = (text, index) => /[A-Za-z\u00C0-\u024F\u3040-\u9fff]/.test(text.slice(0, index));
 
 /**
- * Regex global cacheada por (source, flags). `parseTitle` se ejecuta sobre cada
- * fila de la tabla y recompilar las mismas decenas de RegExp por llamada era un
- * coste innecesario. Al ser compartidas SIEMPRE se resetea `lastIndex` al
- * obtenerlas; los bucles `exec` son síncronos y no anidados sobre la misma
- * regex, así que no hay riesgo de interferencia.
+ * Versión global cacheada de una RegExp. `parseTitle` se ejecuta sobre cada fila
+ * de la tabla y recompilar las mismas decenas de RegExp por llamada era un coste
+ * innecesario. El caché es un WeakMap con la propia RegExp como clave: construir
+ * la clave (source + flags) y buscarla en un Map costaba ~200 ns por llamada
+ * (unas 50 por título), frente a ~10 ns del WeakMap.
+ *
+ * Al ser compartidas SIEMPRE se resetea `lastIndex` al obtenerlas; los bucles
+ * `exec` son síncronos y no anidados sobre la misma regex, así que no hay riesgo
+ * de interferencia.
  */
-const globalRegexCache = new Map();
+const globalRegexCache = new WeakMap();
 function globalRegex(re) {
-  const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-  const key = `${re.source}\u0000${flags}`;
-  let g = globalRegexCache.get(key);
+  let g = globalRegexCache.get(re);
   if (!g) {
+    const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
     g = new RegExp(re.source, flags);
-    globalRegexCache.set(key, g);
+    globalRegexCache.set(re, g);
   }
   g.lastIndex = 0;
   return g;
@@ -318,12 +428,10 @@ function polishTitle(raw) {
   // Puntos sueltos entre palabras ("Movie.Name 2019") → espacio, respetando siglas (S.W.A.T.) y "Mr."
   t = t.replace(/(?<=[a-z0-9]{2})\.(?=[A-Za-z0-9])/g, ' ');
   t = t.replace(/\(\s*\)|\[\s*\]|\{\s*\}/g, ' ');
-  // Ruido de webs sólo en los extremos ("Descargar Pelicula X", "X Torrent"); si vaciase el título, se conserva.
-  const denoised = t
-    .replace(RE_MISC_NOISE_LEAD, '')
-    .replace(RE_MISC_NOISE_TRAIL, '');
-  if (denoised.trim().length >= 2) t = denoised;
-  t = t.replace(RE_LANG_TRAILING, '');
+  // Ruido de webs sólo en los extremos ("Descargar Pelicula X", "X Torrent"); si
+  // vaciase o mutilase el título ("Mi Pelicula" → "Mi"), se conserva el original.
+  t = stripEdgeNoise(t);
+  t = stripTrailingLanguage(t);
   t = t.replace(/^(?:2160p|1080p|1080i|720p|576p|480p|360p|4k|uhd|fhd|3840x2160|1920x1080|1280x720)[ ._-]+/i, '');
   t = t.replace(/\s+/g, ' ');
   t = t.replace(/^[\s\-–—_.:,;!?)\]}]+|[\s\-–—_.:,;([{]+$/g, '');
@@ -418,6 +526,16 @@ export function parseTitle(rawTitle) {
     full = full.slice(leadGroup.index + leadGroup[0].length);
   }
   full = full.replace(/\s+/g, ' ').trim();
+
+  // Mismo grupo, pero sin corchetes: "Anime Time One Piece 1080p".
+  if (!result.releaseGroup) {
+    const bare = matchBareLeadingGroup(full);
+    if (bare) {
+      result.releaseGroup = bare.name;
+      result.releaseGroupProfile = bare.profile;
+      full = full.slice(bare.length).trim();
+    }
+  }
 
   // Contenido de todos los grupos [] () {} (metadatos) y vista sin ellos para localizar el título.
   const bracketContents = [...full.matchAll(RE_BRACKET_GROUPS)].map((m) => m[0].slice(1, -1).trim());
