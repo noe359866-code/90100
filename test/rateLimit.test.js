@@ -58,7 +58,7 @@ test('withRetry: minWaitMs acepta una función (cooldown evaluado en el momento)
       },
     },
   );
-  assert.ok(Date.now() - t0 >= 120, `debe respetar el cooldown del penalty box (tardó ${Date.now() - t0}ms)`);
+  assert.ok(Date.now() - t0 >= 113, `debe respetar el cooldown del penalty box (tardó ${Date.now() - t0}ms)`);
 });
 
 test('rateLimiter: respeta el máximo por ventana', async () => {

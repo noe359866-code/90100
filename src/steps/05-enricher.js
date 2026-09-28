@@ -42,20 +42,20 @@ const isMissing = (v) => v === null || v === undefined || v === '' || v === 0;
 
 /**
  * ¿Qué columnas de telemetría tiene la tabla? (opcionales; ver sql/004_ids_telemetry.sql).
- * Se comprueba CADA columna por separado: una migración parcial debe degradar la
- * telemetría, no romper los updates por una columna inexistente.
+ * Las 4 comprobaciones salen en paralelo: son un round-trip cada una y el enricher
+ * hace esta detección al comienzo de cada ejecución.
  * @returns {Promise<string[]>} columnas disponibles (vacío si faltan las imprescindibles)
  */
 async function detectIdTelemetry(db, table) {
-  const available = [];
-  for (const col of ID_TELEMETRY_FIELDS) {
+  const results = await Promise.all(ID_TELEMETRY_FIELDS.map(async (col) => {
     try {
       const { error } = await db.supabase.from(table).select(col).limit(1);
-      if (!error) available.push(col);
+      return error ? null : col;
     } catch {
-      // la columna no existe en la tabla
+      return null; // la columna no existe en la tabla
     }
-  }
+  }));
+  const available = results.filter(Boolean);
   // Sin ids_checked_at/ids_attempts no se pueden controlar los reintentos; el resto son informativos.
   if (!available.includes('ids_checked_at') || !available.includes('ids_attempts')) return [];
   return available;
@@ -311,49 +311,79 @@ export async function runEnricher(db, config, log, deps = {}) {
   const groups = new Map();
   let scanned = 0;
 
-  for (const query of queries) {
-    for await (const page of db.iterateRows({ select, applyFilters: query.filters })) {
-      for (const row of page) {
-        scanned += 1;
-        let parsed = parseTitle(row.title);
-        if (!parsed.cleanTitle && row[cleanCol]) {
-          const alt = parseTitle(String(row[cleanCol]));
-          if (alt.cleanTitle) parsed = { ...parsed, cleanTitle: alt.cleanTitle, searchKey: alt.searchKey, year: parsed.year ?? alt.year };
-        }
-        const type = row.type || parsed.type;
-        const needed = missingIdsFor(type, row, { hasTmdb, tmdbForAnime });
-        if (!needed.size || !parsed.cleanTitle) continue;
-
-        const seasonKey = type === 'anime' && parsed.season && parsed.season > 1 ? String(parsed.season) : '';
-        const key = `${type}|${parsed.searchKey}|${parsed.year ?? ''}|${seasonKey}`;
-        let g = groups.get(key);
-        if (!g) {
-          g = {
-            key,
-            type,
-            /** `type` inferido por el parser (la fila no lo tiene en la BD): el match de TMDB se intenta en ambos tipos. */
-            typeGuessed: !row.type,
-            searchKey: parsed.searchKey,
-            seasonKey,
-            label: parsed.cleanTitle + (parsed.year ? ` (${parsed.year})` : '') + (seasonKey ? ` S${seasonKey}` : ''),
-            variants: buildSearchVariants(parsed),
-            year: parsed.year,
-            hasEpisode: parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null,
-            known: {},
-            needed: new Set(),
-            rows: [],
-          };
-          groups.set(key, g);
-        }
-        g.rows.push({ id: row.id, needed });
-        if (!row.type) g.typeGuessed = true;
-        if (trackIds) g.attempts = Math.max(g.attempts ?? 0, Number(row.ids_attempts) || 0);
-        for (const f of needed) g.needed.add(f);
-        for (const f of ID_FIELDS) if (!isMissing(row[f]) && isMissing(g.known[f])) g.known[f] = row[f];
-        if (parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null) g.hasEpisode = true;
-      }
-    }
+  // Progreso visible: en tablas grandes el escaneo tarda minutos y en el log de
+  // Actions antes parecía que el paso estaba colgado hasta que aparecía el total.
+  let totalEstimate = 0;
+  try {
+    const counts = await Promise.all(queries.map((q) => db.countWhere(q.filters, 'enricher (cuenta huérfanos)').catch(() => 0)));
+    totalEstimate = counts.reduce((a, b) => a + b, 0);
+  } catch {
+    totalEstimate = 0; // el recuento es sólo informativo
   }
+  if (totalEstimate > 0) log.info(`enricher: escaneando ${totalEstimate} filas candidatas (consultas en paralelo)…`);
+
+  let lastProgressAt = Date.now();
+  const logProgress = () => {
+    if (Date.now() - lastProgressAt < 15_000) return;
+    lastProgressAt = Date.now();
+    const pct = totalEstimate > 0 ? ` (${Math.min(100, Math.round((scanned / totalEstimate) * 100))}%)` : '';
+    log.info(`enricher: escaneando… ${scanned} filas${pct}, ${groups.size} obras hasta ahora`);
+  };
+
+  /**
+   * Procesa una página completa. Debe ser SÍNCRONA: al no haber `await` dentro,
+   * dos consultas paralelas nunca entremezclan filas sobre el mismo `groups`.
+   */
+  const ingestRows = (page) => {
+    for (const row of page) {
+      scanned += 1;
+      let parsed = parseTitle(row.title);
+      if (!parsed.cleanTitle && row[cleanCol]) {
+        const alt = parseTitle(String(row[cleanCol]));
+        if (alt.cleanTitle) parsed = { ...parsed, cleanTitle: alt.cleanTitle, searchKey: alt.searchKey, year: parsed.year ?? alt.year };
+      }
+      const type = row.type || parsed.type;
+      const needed = missingIdsFor(type, row, { hasTmdb, tmdbForAnime });
+      if (!needed.size || !parsed.cleanTitle) continue;
+
+      const seasonKey = type === 'anime' && parsed.season && parsed.season > 1 ? String(parsed.season) : '';
+      const key = `${type}|${parsed.searchKey}|${parsed.year ?? ''}|${seasonKey}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = {
+          key,
+          type,
+          /** `type` inferido por el parser (la fila no lo tiene en la BD): el match de TMDB se intenta en ambos tipos. */
+          typeGuessed: !row.type,
+          searchKey: parsed.searchKey,
+          seasonKey,
+          label: parsed.cleanTitle + (parsed.year ? ` (${parsed.year})` : '') + (seasonKey ? ` S${seasonKey}` : ''),
+          variants: buildSearchVariants(parsed),
+          year: parsed.year,
+          hasEpisode: parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null,
+          known: {},
+          needed: new Set(),
+          rows: [],
+        };
+        groups.set(key, g);
+      }
+      g.rows.push({ id: row.id, needed });
+      if (!row.type) g.typeGuessed = true;
+      if (trackIds) g.attempts = Math.max(g.attempts ?? 0, Number(row.ids_attempts) || 0);
+      for (const f of needed) g.needed.add(f);
+      for (const f of ID_FIELDS) if (!isMissing(row[f]) && isMissing(g.known[f])) g.known[f] = row[f];
+      if (parsed.episode !== null || parsed.season !== null || row.episode != null || row.season != null || row.absolute_episode != null) g.hasEpisode = true;
+    }
+  };
+
+  // 2 páginas en vuelo por consulta: la petición de la página siguiente viaja
+  // mientras la actual se parsea (3 streams × 2 = máx. 6 selects simultáneos).
+  await Promise.all(queries.map(async (query) => {
+    for await (const page of db.iterateRows({ select, applyFilters: query.filters, prefetch: 2 })) {
+      ingestRows(page);
+      logProgress();
+    }
+  }));
 
   // "Dune Part Two (2024)" y "Dune Part Two 1080p" son la misma obra. Años
   // distintos (remakes) no se mezclan; un año ausente se une al único año conocido.
