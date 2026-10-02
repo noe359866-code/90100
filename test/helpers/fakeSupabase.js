@@ -4,14 +4,15 @@
  */
 
 function parseOrFilter(expr) {
-  // "a.is.null,b.not.is.null,seeders.eq.0"
+  // "a.is.null,b.not.is.null,seeders.eq.0,imdb_id.eq.\"\""
   return expr.split(',').map((part) => {
     const segs = part.split('.');
     const col = segs.shift();
     let negate = false;
     if (segs[0] === 'not') { negate = true; segs.shift(); }
     const op = segs.shift();
-    const val = segs.join('.');
+    let val = segs.join('.');
+    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
     return { col, op, val, negate };
   });
 }

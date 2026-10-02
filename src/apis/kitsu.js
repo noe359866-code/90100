@@ -39,6 +39,7 @@ export function createKitsuClient({
         headers: HEADERS,
         timeoutMs: 15000,
         retries: 3,
+        retryCondition: (err) => !([429, 503].includes(err?.status) && limiter.stats().disabled),
         onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
         minWaitMs: () => limiter.stats().cooldownMs,
         onRetry: (err, attempt, wait) => log?.warn(`Kitsu: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),

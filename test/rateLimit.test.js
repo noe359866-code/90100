@@ -61,6 +61,27 @@ test('withRetry: minWaitMs acepta una función (cooldown evaluado en el momento)
   assert.ok(Date.now() - t0 >= 113, `debe respetar el cooldown del penalty box (tardó ${Date.now() - t0}ms)`);
 });
 
+test('withRetry: vuelve a validar el circuit breaker tras el backoff', async () => {
+  let allowed = true;
+  let calls = 0;
+  const task = withRetry(
+    async () => {
+      calls += 1;
+      throw new Error('transitorio');
+    },
+    {
+      retries: 3,
+      baseMs: 20,
+      maxMs: 20,
+      shouldRetry: () => allowed,
+    },
+  );
+  setTimeout(() => { allowed = false; }, 5);
+
+  await assert.rejects(task, /transitorio/);
+  assert.equal(calls, 1, 'no se debe intentar otra vez si el interruptor abrió durante la espera');
+});
+
 test('rateLimiter: respeta el máximo por ventana', async () => {
   const limiter = createRateLimiter({ maxRequests: 2, perMs: 300 });
   const t0 = Date.now();
@@ -141,6 +162,26 @@ test('rateLimiter: interruptor tras N 429 consecutivos (falla rápido y se recup
   await limiter(() => {});
 });
 
+test('rateLimiter: el interruptor también detiene peticiones que ya estaban en cola', async () => {
+  const limiter = createRateLimiter({
+    maxRequests: 1,
+    perMs: 80,
+    baseCooldownMs: 10,
+    maxConsecutiveThrottles: 1,
+    disableMs: 250,
+    name: 'Test',
+  });
+  let ran = false;
+  await limiter(() => 'primera'); // consume el único cupo de la ventana
+  const queued = limiter(() => { ran = true; });
+  // Da tiempo a la segunda llamada para entrar en acquire() y esperar la ventana.
+  await new Promise((r) => setTimeout(r, 10));
+  limiter.reportThrottle(0); // abre el interruptor mientras estaba en espera
+
+  await assert.rejects(queued, (err) => err.code === 'ERR_RATE_LIMITED');
+  assert.equal(ran, false, 'la petición encolada no debe salir después del cooldown');
+});
+
 const withFetch = async (stub, fn) => {
   const original = globalThis.fetch;
   globalThis.fetch = stub;
@@ -216,7 +257,7 @@ test('anilist: las búsquedas repetidas se sirven de caché', async () => {
   assert.equal(calls, 1);
 });
 
-test('anilist: con el interruptor abierto falla rápido y no prueba más variantes', async () => {
+test('anilist: el interruptor abierto impide reintentos HTTP y variantes posteriores', async () => {
   let calls = 0;
   const client = createAniListClient({
     requestsPerMinute: 60,
@@ -225,18 +266,21 @@ test('anilist: con el interruptor abierto falla rápido y no prueba más variant
     disableMs: 5_000,
   });
 
-  // 1ª búsqueda: un 429 y después OK → esto abre el interruptor
-  await withFetch(async () => {
-    calls += 1;
-    return calls === 1 ? errorResponse(429, 0) : jsonResponse({ data: { Page: { media: [] } } });
-  }, () => client.search('A'));
-
+  // El primer 429 abre el interruptor; ni el reintento interno ni las variantes
+  // siguientes deben emitir nuevas peticiones durante la pausa.
+  await assert.rejects(
+    () => withFetch(async () => {
+      calls += 1;
+      return errorResponse(429, 0);
+    }, () => client.search('A')),
+    (err) => err.code === 'ERR_RATE_LIMITED',
+  );
+  assert.equal(calls, 1, 'no debe reintentar HTTP con el interruptor abierto');
   assert.equal(client.stats().disabled, true);
 
-  // 2ª búsqueda con dos variantes: debe fallar rápido, sin gastar más peticiones
   await assert.rejects(
     () => withFetch(async () => jsonResponse({ data: { Page: { media: [] } } }), () => client.findBest(['B1', 'B2'])),
     (err) => err.code === 'ERR_RATE_LIMITED',
   );
-  assert.equal(calls, 2, 'no debe lanzar más peticiones con el interruptor abierto');
+  assert.equal(calls, 1, 'no debe lanzar peticiones adicionales con el interruptor abierto');
 });

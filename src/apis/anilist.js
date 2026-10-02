@@ -52,6 +52,7 @@ export function createAniListClient({
         body: { query: SEARCH_QUERY, variables: { search: text } },
         timeoutMs: 15000,
         retries: 3,
+        retryCondition: (err) => !([429, 503].includes(err?.status) && limiter.stats().disabled),
         onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
         // El reintento espera el cooldown del penalty box: reintentar antes sólo
         // provoca otro 429 y alarga el bloqueo.

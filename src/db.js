@@ -179,7 +179,7 @@ export function createDb(config, { client } = {}) {
    *
    * @param {(q:any)=>any} applyFilters  se aplica tanto al SELECT como al DELETE
    * @param {string} label
-   * @param {{ preview?: (rows:any[]) => void, select?: string, confirm?: (row:any)=>boolean }} [opts]
+   * @param {{ select?: string, confirm?: (row:any)=>boolean }} [opts]
    *   `confirm`: filtro adicional en cliente (p. ej. regex precisa) — las filas que no lo pasen no se borran.
    */
   async function deleteWhere(applyFilters, label, { select = 'id', confirm } = {}) {
@@ -246,11 +246,11 @@ export function createDb(config, { client } = {}) {
       //  - sin `confirm`, si el DELETE borró menos de las pedidas (RLS, trigger,
       //    lock, borrado concurrente…). Si no avanzásemos, esas filas volverían a
       //    salir en el siguiente SELECT y el resto de la tabla no se procesaría.
-      if (deleted < targets.length || confirm) lastId = data[data.length - 1].id;
-      if (!confirm && deleted < data.length) {
+      if (deleted < targets.length) {
         partialBatches += 1;
-        if (deleted > 0) log.debug(`${label}: ${deleted}/${data.length} borradas en el lote (el resto se queda)`);
+        if (deleted > 0) log.debug(`${label}: ${deleted}/${targets.length} candidatas confirmadas borradas en el lote (el resto se queda)`);
       }
+      if (deleted < targets.length || confirm) lastId = data[data.length - 1].id;
 
       if (data.length < config.deleteChunkSize) break; // era la última página de candidatos
       await sleep(25); // pequeño respiro para no saturar la BD

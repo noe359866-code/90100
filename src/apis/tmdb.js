@@ -63,6 +63,7 @@ export function createTmdbClient({ apiKey, requestsPerSecond = 20, cooldownMs, m
         headers: isBearer ? { Authorization: `Bearer ${key}` } : {},
         timeoutMs: 15000,
         retries: 3,
+        retryCondition: (err) => !([429, 503].includes(err?.status) && limiter.stats().disabled),
         onThrottle: (err) => limiter.reportThrottle?.(err.retryAfterMs),
         minWaitMs: () => limiter.stats().cooldownMs,
         onRetry: (err, attempt, wait) => log?.warn(`TMDB: reintento ${attempt} (${Math.round(wait)}ms) → ${err.message}`),
