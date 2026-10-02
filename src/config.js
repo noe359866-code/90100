@@ -127,11 +127,11 @@ export const config = Object.freeze({
   cleanTitleColumn: clean(env.CLEAN_TITLE_COLUMN) || 'title_text',
 
   // --- Ejecución ----------------------------------------------------------
-  dryRun: toBool(env.DRY_RUN, false),
+  dryRun: toBool(env.DRY_RUN, true),
   steps: parsedSteps.steps,
   /** Error de sintaxis en `STEPS` (si lo hay, `validateConfig` aborta con un mensaje claro). */
   stepsError: parsedSteps.error ?? null,
-  continueOnError: toBool(env.CONTINUE_ON_ERROR, true),
+  continueOnError: toBool(env.CONTINUE_ON_ERROR, false),
   logLevel,
   /** Avisos no fatales de configuración; `index.js` los loguea al arrancar. */
   warnings,

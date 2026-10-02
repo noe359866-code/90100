@@ -207,10 +207,13 @@ test('guard: aplica el ratio sólo cuando hay filas suficientes', () => {
 
 test('guard: valores degenerados no abortan', () => {
   assert.equal(exceedsDeleteRatio(0, 100, 0.5), false);
-  assert.equal(exceedsDeleteRatio(5, 0, 0.5), false);
-  assert.equal(exceedsDeleteRatio(NaN, 100, 0.5), false);
-  assert.equal(exceedsDeleteRatio(50, NaN, 0.5), false);
-  assert.equal(exceedsDeleteRatio(Infinity, 10, 0.5), false);
+  assert.equal(exceedsDeleteRatio(5, 0, 0.5), true);
+  // Valores inválidos deben activar el bloqueo (fail closed), no desactivar la guardia.
+  assert.equal(exceedsDeleteRatio(NaN, 100, 0.5), true);
+  assert.equal(exceedsDeleteRatio(50, NaN, 0.5), true);
+  assert.equal(exceedsDeleteRatio(Infinity, 10, 0.5), true);
+  assert.equal(exceedsDeleteRatio(11, 10, 0.5), true);
+  assert.equal(exceedsDeleteRatio(1, 10, NaN), true);
 });
 
 test('guard: el error explica las cifras y el límite', () => {

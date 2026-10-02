@@ -21,8 +21,20 @@ export const MIN_ROWS_FOR_RATIO = 10;
  * @param {number} [minRows] filas mínimas para que el ratio se aplique
  */
 export function exceedsDeleteRatio(pending, evaluated, maxRatio, minRows = MIN_ROWS_FOR_RATIO) {
-  if (!Number.isFinite(pending) || !Number.isFinite(evaluated)) return false;
-  if (pending <= 0 || evaluated <= 0) return false;
+  // Fail closed: un dato inválido nunca debe desactivar una protección destructiva.
+  if (
+    !Number.isFinite(pending) ||
+    !Number.isFinite(evaluated) ||
+    !Number.isFinite(maxRatio) ||
+    !Number.isFinite(minRows) ||
+    pending < 0 ||
+    evaluated < 0 ||
+    maxRatio < 0 ||
+    maxRatio > 1 ||
+    minRows < 0
+  ) return true;
+  if (pending === 0) return false;
+  if (evaluated === 0 || pending > evaluated) return true;
   if (evaluated < minRows) return false;
   return pending / evaluated > maxRatio;
 }

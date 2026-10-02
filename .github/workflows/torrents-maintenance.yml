@@ -9,7 +9,7 @@ on:
       dry_run:
         description: 'Simular sin escribir en la base de datos'
         type: boolean
-        default: false
+        default: true
       steps:
         description: 'Pasos a ejecutar (all | adult,size,dead,normalize,enrich,dedupe)'
         type: string
@@ -61,20 +61,20 @@ jobs:
           # --- Secrets (Settings → Secrets and variables → Actions → pestaña "Secrets") ---
           # OJO: si guardas la credencial en un "Environment" (Settings → Environments),
           # el job debe declarar `environment: <nombre>` para recibirla; si no, llega vacía.
-          # El `|| vars.` permite haberla guardado como Variable sin romper el flujo.
+          # La URL no es secreta; la clave service_role siempre debe ser un Secret.
           SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL || '' }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_ROLE_KEY || '' }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || '' }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY || vars.TMDB_API_KEY || '' }}
 
           # --- Parámetros de ejecución ---
-          # inputs.dry_run es boolean: `false` es falsy en expresiones de Actions y, con
-          # `|| vars.DRY_RUN`, un dry-run desmarcado se ignoraba si la variable era true.
-          # Se convierte a string antes de combinarlo.
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && 'true' || 'false') || vars.DRY_RUN || 'false' }}
+          # Simulación segura por defecto en ejecución programada y manual.
+          # Para escribir, desmarca dry_run en ejecución manual o configura DRY_RUN=false.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && 'true' || 'false') || vars.DRY_RUN || 'true' }}
           STEPS: ${{ github.event_name == 'workflow_dispatch' && inputs.steps || vars.STEPS || 'all' }}
           LOG_LEVEL: ${{ github.event_name == 'workflow_dispatch' && inputs.log_level || vars.LOG_LEVEL || 'info' }}
           ENRICH_MAX_LOOKUPS: ${{ github.event_name == 'workflow_dispatch' && inputs.enrich_max_lookups || vars.ENRICH_MAX_LOOKUPS || '300' }}
-          CONTINUE_ON_ERROR: ${{ vars.CONTINUE_ON_ERROR || 'true' }}
+          # Las etapas posteriores no deben ejecutarse si una etapa falla.
+          CONTINUE_ON_ERROR: ${{ vars.CONTINUE_ON_ERROR || 'false' }}
 
           # --- Ajustes opcionales (Repository variables; ver .env.example) ---
           TABLE_NAME: ${{ vars.TABLE_NAME || 'torrents' }}
