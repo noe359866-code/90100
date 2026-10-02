@@ -2,7 +2,7 @@
 
 Script Node.js (sin framework, una sola dependencia: `@supabase/supabase-js`) que mantiene
 la tabla `torrents` de Supabase limpia, normalizada, enriquecida y deduplicada.
-Está pensado para ejecutarse en **GitHub Actions** de forma programada.
+Está pensado para ejecutarse en **GitHub Actions** de forma programada. Requiere **Node.js 22 o superior**.
 
 ## Qué hace (en orden)
 
@@ -283,3 +283,17 @@ src/
 sql/     001_indexes.sql 002_bulk_update_rpc.sql
 test/    unitarios + pipeline de integración con Supabase falso en memoria
 ```
+
+## Desarrollo y comprobaciones
+
+La integración continua ejecuta la suite offline en Node.js 22 y 24 para cada push y pull request,
+y audita las dependencias de producción. Para reproducirlo localmente:
+
+```bash
+npm ci
+npm test
+npm audit --omit=dev
+```
+
+Los tests usan un cliente Supabase falso en memoria; no necesitan credenciales ni escriben en una
+base de datos real.

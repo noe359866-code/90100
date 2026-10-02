@@ -88,11 +88,21 @@ export function createRateLimiter({
   let throttleCount = 0;
   let disabledUntil = 0;
 
+  const disabledError = () => {
+    const err = new Error(`${name}: en pausa por rate limit hasta las ${new Date(disabledUntil).toISOString()}`);
+    err.code = 'ERR_RATE_LIMITED';
+    return err;
+  };
+
   const acquire = () => {
     const p = queue.then(async () => {
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const now = Date.now();
+        // Una llamada puede quedar en cola antes de que se abra el interruptor.
+        // Volvemos a comprobarlo tras cada espera para que esas peticiones no
+        // salgan igualmente cuando expire el cooldown normal.
+        if (now < disabledUntil) throw disabledError();
 
         // Si ha pasado una ventana completa sin 429, recuperamos tasa poco a poco
         if (lastThrottleAt > 0 && currentMax < maxRequests && now - lastThrottleAt >= perMs) {
@@ -119,11 +129,7 @@ export function createRateLimiter({
   };
 
   const schedule = async (fn) => {
-    if (Date.now() < disabledUntil) {
-      const err = new Error(`${name}: en pausa por rate limit hasta las ${new Date(disabledUntil).toISOString()}`);
-      err.code = 'ERR_RATE_LIMITED';
-      throw err;
-    }
+    if (Date.now() < disabledUntil) throw disabledError();
     await acquire();
     return fn();
   };
@@ -168,7 +174,9 @@ export function createRateLimiter({
 
 /**
  * Reintentos con backoff exponencial + jitter.
- * `shouldRetry(err)` decide si un error es transitorio.
+ * `shouldRetry(err)` decide si un error es transitorio. Se evalúa antes y
+ * después de la espera, de modo que un interruptor/cancelación que cambie
+ * durante el backoff pueda impedir que la petición salga.
  * `minWaitMs` (número o función) fija una espera mínima adicional — p. ej. el
  * cooldown del penalty box del limitador, para que un reintento no salga antes
  * de que el servidor se haya "enfriado" (reintentar pronto sólo empeora el 429).
@@ -187,6 +195,7 @@ export async function withRetry(fn, { retries = 4, baseMs = 500, maxMs = 15000, 
       const wait = Math.max(retryAfter || 0, backoff, floor || 0);
       onRetry?.(err, attempt + 1, wait);
       await sleep(wait);
+      if (!shouldRetry(err)) throw err;
       attempt += 1;
     }
   }

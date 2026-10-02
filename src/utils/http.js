@@ -48,8 +48,9 @@ const parseRetryAfter = (headerValue) => {
  * @param {(err: Error, attempt: number, waitMs: number) => void} [options.onRetry]
  * @param {(err: HttpError) => void} [options.onThrottle] se llama en cada 429/503, antes de reintentar
  * @param {number|() => number} [options.minWaitMs] espera mínima entre reintentos (p. ej. cooldown del limitador)
+ * @param {(err: Error) => boolean} [options.retryCondition] condición adicional para cancelar un reintento (p. ej. un circuit breaker abierto)
  */
-export async function fetchJson(url, { method = 'GET', headers = {}, body, timeoutMs = 15000, retries = 3, onRetry, onThrottle, minWaitMs } = {}) {
+export async function fetchJson(url, { method = 'GET', headers = {}, body, timeoutMs = 15000, retries = 3, onRetry, onThrottle, minWaitMs, retryCondition = () => true } = {}) {
   // Un mismo 429 reintentado no debe contar como varios incidentes: si no, los
   // reintentos de UNA petición disparan el interruptor (4 rechazos seguidos).
   let reportedThrottle = false;
@@ -95,7 +96,12 @@ export async function fetchJson(url, { method = 'GET', headers = {}, body, timeo
           clearTimeout(timer);
         }
       },
-      { retries, shouldRetry: isTransientHttp, onRetry, minWaitMs },
+      {
+        retries,
+        shouldRetry: (err) => isTransientHttp(err) && retryCondition(err),
+        onRetry,
+        minWaitMs,
+      },
     );
   } catch (err) {
     // Sin reintentos que valgan, un 429/503 agotado es "rate limit", no un error

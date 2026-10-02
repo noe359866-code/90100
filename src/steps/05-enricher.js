@@ -37,6 +37,18 @@ import { createTmdbClient } from '../apis/tmdb.js';
 import { mapWithConcurrency } from '../utils/async.js';
 
 const ID_FIELDS = ['imdb_id', 'tmdb_id', 'anilist_id', 'kitsu_id', 'mal_id'];
+const NUMERIC_ID_FIELDS = new Set(['tmdb_id', 'anilist_id', 'kitsu_id', 'mal_id']);
+
+/**
+ * Filtro PostgREST para IDs ausentes. El código también considera vacíos los
+ * IDs numéricos `0` y el `imdb_id` de texto vacío, así que el prefiltro SQL debe
+ * incluir esos sentinelas además de NULL.
+ */
+function missingIdFilter(fields) {
+  return fields.flatMap((field) => NUMERIC_ID_FIELDS.has(field)
+    ? [`${field}.is.null`, `${field}.eq.0`]
+    : [`${field}.is.null`, `${field}.eq.\"\"`]).join(',');
+}
 
 /**
  * `imdb_id` suele llevar un CHECK `^tt[0-9]+$` en la tabla: si TMDB devuelve algo
@@ -392,13 +404,22 @@ export async function runEnricher(db, config, log, deps = {}) {
   const queries = [
     {
       label: 'anime',
-      filters: (q) => q.eq('type', 'anime').or(`anilist_id.is.null,kitsu_id.is.null,mal_id.is.null${hasTmdb && tmdbForAnime ? ',tmdb_id.is.null,imdb_id.is.null' : ''}`),
+      filters: (q) => q.eq('type', 'anime').or(missingIdFilter([
+        'anilist_id', 'kitsu_id', 'mal_id',
+        ...(hasTmdb && tmdbForAnime ? ['tmdb_id', 'imdb_id'] : []),
+      ])),
     },
   ];
   if (hasTmdb) {
-    queries.push({ label: 'movie/series', filters: (q) => q.in('type', ['movie', 'series']).or('tmdb_id.is.null,imdb_id.is.null') });
+    queries.push({
+      label: 'movie/series',
+      filters: (q) => q.in('type', ['movie', 'series']).or(missingIdFilter(['tmdb_id', 'imdb_id'])),
+    });
   }
-  queries.push({ label: 'sin tipo', filters: (q) => q.is('type', null).or('tmdb_id.is.null,anilist_id.is.null,kitsu_id.is.null') });
+  // El tipo puede inferirse del título al ingerir la fila, así que este prefiltro
+  // incluye todos los IDs. Limitarlo a tmdb/anilist/kitsu dejaba sin revisar, por
+  // ejemplo, filas sin tipo con sólo mal_id=0 o imdb_id vacío.
+  queries.push({ label: 'sin tipo', filters: (q) => q.is('type', null).or(missingIdFilter(ID_FIELDS)) });
 
   if (trackIds) {
     for (const query of queries) {

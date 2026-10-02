@@ -203,3 +203,27 @@ test('deleteWhere: si el mismo lote vuelve a salir sin progresar, se corta', asy
   assert.equal(deleted, 0);
   assert.equal(selects, 4, `no se repite el mismo lote sin fin (${selects} SELECTs)`);
 });
+
+test('deleteWhere: informa de lotes parciales también cuando usa confirm()', async () => {
+  const { client, rows } = partialDeleteClient(new Set([1, 2, 3, 4]));
+  const db = createDb({
+    table: 'torrents', dryRun: false, deleteChunkSize: 4, pageSize: 50,
+    supabaseUrl: 'http://example.invalid', supabaseKey: 'test',
+  }, { client });
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  let deleted;
+  try {
+    deleted = await db.deleteWhere((q) => q, 'test-confirm', {
+      select: 'id,title',
+      confirm: () => true,
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(deleted, 8);
+  assert.deepEqual(rows.map((r) => r.id), [1, 2, 3, 4]);
+  assert.match(warnings.join('\n'), /1 lote\(s\) no se pudieron borrar por completo/);
+});

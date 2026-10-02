@@ -244,3 +244,52 @@ test('vía exacta: el tipo que devuelve /find manda (película vs serie)', async
   assert.deepEqual(pedidos, ['tv'], '/find sabe qué tipo preferir');
   assert.equal(store.tables.torrents[0].tmdb_id, 555);
 });
+
+test('prefiltro del enriquecedor: descubre IDs 0 y vacíos, también en filas sin tipo', async () => {
+  const { client, store } = createFakeSupabase([
+    row(1, '[SubsPlease] Sousou no Frieren - 09 [1080p]', {
+      type: 'anime', tmdb_id: 209867, imdb_id: 'tt0123456', anilist_id: 154587, kitsu_id: 46474, mal_id: 0,
+    }),
+    row(2, '[Erai-raws] Chainsaw Man - 01 [1080p]', {
+      type: null, tmdb_id: 114410, imdb_id: 'tt0123457', anilist_id: 126403, kitsu_id: 50026, mal_id: 0,
+    }),
+  ]);
+  const db = createDb(config(), { client });
+  const mappingCalls = [];
+  const result = await runEnricher(db, config(), silentLog, {
+    anilist: { findBest: async () => null, stats: statsStub },
+    kitsu: {
+      byAniListId: async () => null,
+      byMalId: async () => null,
+      findBest: async () => null,
+      externalIds: async (id) => {
+        mappingCalls.push(id);
+        return { anilist_id: null, mal_id: id === 46474 ? 52991 : 44511 };
+      },
+      stats: statsStub,
+    },
+    tmdb: { findBest: async () => null, externalIds: async () => ({ imdb_id: null }), stats: statsStub },
+  });
+
+  assert.equal(result.scanned, 2, 'ambas las filas deben llegar al enriquecedor');
+  assert.deepEqual(mappingCalls.sort((a, b) => a - b), [46474, 50026]);
+  assert.equal(store.tables.torrents[0].mal_id, 52991, 'mal_id=0 se trata como ausente');
+  assert.equal(store.tables.torrents[1].mal_id, 44511, 'la fila sin tipo también se selecciona por mal_id=0');
+});
+
+test('prefiltro del enriquecedor: una cadena imdb_id vacía se considera ausente', async () => {
+  const { client, store } = createFakeSupabase([
+    row(1, 'Dune Part Two (2024) 1080p', { type: 'movie', tmdb_id: 693134, imdb_id: '' }),
+  ]);
+  const db = createDb(config(), { client });
+  const result = await runEnricher(db, config(), silentLog, {
+    tmdb: {
+      findBest: async () => null,
+      externalIds: async () => ({ imdb_id: 'tt15239678' }),
+      stats: statsStub,
+    },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(store.tables.torrents[0].imdb_id, 'tt15239678');
+});

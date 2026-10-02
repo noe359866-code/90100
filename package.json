@@ -6,7 +6,7 @@
   "main": "src/index.js",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node src/index.js",
