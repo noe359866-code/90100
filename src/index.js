@@ -83,10 +83,12 @@ async function preflightCredentials() {
 function writeGithubSummary(results, dbStats, totalMs) {
   const file = process.env.GITHUB_STEP_SUMMARY;
   if (!file) return;
+  const deleteLabel = config.dryRun ? 'Se eliminarían' : 'Borradas';
+  const updateLabel = config.dryRun ? 'Se actualizarían' : 'Actualizadas';
   const lines = [
     `## 🧹 Mantenimiento de \`${config.table}\`${config.dryRun ? ' — **DRY RUN**' : ''}`,
     '',
-    `Duración total: **${fmtMs(totalMs)}** · Borradas: **${dbStats.deleted}** · Actualizadas: **${dbStats.updated}**`,
+    `Duración total: **${fmtMs(totalMs)}** · ${deleteLabel}: **${dbStats.deleted}** · ${updateLabel}: **${dbStats.updated}**`,
     '',
     '| Paso | Estado | Duración | Resultado |',
     '|------|--------|----------|-----------|',

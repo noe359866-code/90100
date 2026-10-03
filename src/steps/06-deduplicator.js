@@ -8,8 +8,8 @@
  *
  * Agrupación:
  *   - Clave de obra: imdb_id → tmdb_id (con tipo movie/tv) → anilist_id → kitsu_id.
- *     Se usa union-find para unir filas de la misma obra aunque tengan IDs
- *     distintos (una fila con imdb+tmdb enlaza ambas claves).
+ *     Union-find une filas relacionadas por más de un ID. Si falta el ID, se usa
+ *     título/tipo/año; ese alias sólo se conecta a IDs cuando no es ambiguo.
  *   - Clave de episodio: SxxEyy / episodio absoluto / pack de temporada / película.
  *
  * Puntuación (mayor = mejor):
@@ -260,20 +260,42 @@ export async function runDeduplicator(db, config, log) {
   const entries = [];
   let scanned = 0;
   let skippedNoId = 0;
+  let fallbackTitleRows = 0;
+  let ambiguousTitleLinks = 0;
+  const titleOnlyKeys = new Set();
+  /** Guarda los grupos con ID para conectarlos sólo si el alias no es ambiguo. */
+  const titleToExternalIds = new Map();
 
   const applyFilters = (q) => (config.dedupe.fallbackTitleKey
     ? q
     : q.or('imdb_id.not.is.null,tmdb_id.not.is.null,anilist_id.not.is.null,kitsu_id.not.is.null,mal_id.not.is.null'));
+  if (!config.dedupe.fallbackTitleKey) {
+    log.warn('dedupe: DEDUP_FALLBACK_TITLE_KEY=false; se ignorarán las filas sin ningún ID externo.');
+  }
 
   for await (const page of db.iterateRows({ select, applyFilters })) {
     for (const row of page) {
       scanned += 1;
       const parsed = parseTitle(row.title);
       let ids = workIdentifiers(row, parsed);
-      if (!ids.length) {
-        if (!config.dedupe.fallbackTitleKey || !parsed.searchKey) { skippedNoId += 1; continue; }
-        ids = [`title:${row.type || parsed.type}:${parsed.searchKey}:${parsed.year ?? ''}`];
+
+      // Una misma obra puede tener filas mezcladas: unas con ID de TMDB/IMDb y
+      // otras sin ningún ID. El título normalizado + tipo + año agrupa las que no
+      // tienen ID; luego sólo las enlaza con IDs si hay un único grupo de IDs posible.
+      // Así evitamos fusionar remakes/obras homónimas sólo por compartir el nombre.
+      const titleKey = config.dedupe.fallbackTitleKey && parsed.searchKey.length >= 3
+        ? `title:${String(row.type || parsed.type || 'unknown').toLowerCase()}:${parsed.searchKey}:${parsed.year ?? ''}`
+        : null;
+      if (ids.length && titleKey) {
+        let owners = titleToExternalIds.get(titleKey);
+        if (!owners) { owners = new Set(); titleToExternalIds.set(titleKey, owners); }
+        owners.add(ids[0]);
+      } else if (titleKey) {
+        ids = [titleKey];
+        titleOnlyKeys.add(titleKey);
+        fallbackTitleRows += 1;
       }
+      if (!ids.length) { skippedNoId += 1; continue; }
       for (let i = 1; i < ids.length; i += 1) uf.union(ids[0], ids[i]);
 
       const audio = mergeLanguages(normalizeLanguageArray(row.audio), parsed.languages.audio);
@@ -296,6 +318,16 @@ export async function runDeduplicator(db, config, log) {
       });
     }
     if (scanned % (config.pageSize * 20) === 0) log.info(`dedupe: ${scanned} filas cargadas...`);
+  }
+
+  // Conecta los grupos por título con los que sí tenían IDs. Si dos o más grupos
+  // de IDs diferentes comparten título/tipo/año, el alias es ambiguo y no se usa.
+  for (const titleKey of titleOnlyKeys) {
+    const owners = titleToExternalIds.get(titleKey);
+    if (!owners?.size) continue;
+    const roots = new Set([...owners].map((id) => uf.find(id)));
+    if (roots.size === 1) uf.union(titleKey, roots.values().next().value);
+    else ambiguousTitleLinks += 1;
   }
 
   // --- Agrupar por obra → episodio ---
@@ -350,12 +382,29 @@ export async function runDeduplicator(db, config, log) {
   if (unknownEpisodeGroups > 0) {
     log.info(`dedupe: ${unknownEpisodeRows} filas en ${unknownEpisodeGroups} grupos sin episodio identificable se dejan intactas (no se puede saber si son el mismo episodio)`);
   }
-  log.info(`dedupe: ${scanned} filas (${skippedNoId} sin IDs ignoradas), ${groupCount} grupos obra+episodio, ${groupsWithDuplicates} con duplicados → ${toDelete.length} a eliminar (${(ratio * 100).toFixed(1)}%)`);
+  if (ambiguousTitleLinks > 0) {
+    log.info(`dedupe: ${ambiguousTitleLinks} alias título/tipo/año ambiguos no se usaron para enlazar IDs distintos`);
+  }
+  log.info(`dedupe: ${scanned} filas (${fallbackTitleRows} sin IDs agrupadas por título/año, ${skippedNoId} sin clave de obra ignoradas), ${groupCount} grupos obra+episodio, ${groupsWithDuplicates} con duplicados → ${toDelete.length} a eliminar (${(ratio * 100).toFixed(1)}%)`);
   if (exceedsDeleteRatio(toDelete.length, entries.length, config.maxDeleteRatio)) {
     throw deleteRatioError('dedupe', toDelete.length, entries.length, config.maxDeleteRatio);
   }
 
   const deleted = await db.deleteByIds(toDelete, 'dedupe');
-  log.info(`Deduplicador: ${deleted} torrents excedentes eliminados`);
-  return { scanned, skippedNoId, groups: groupCount, groupsWithDuplicates, deleted, skippedUnknownEpisode: unknownEpisodeRows };
+  if (config.dryRun) {
+    log.info(`Deduplicador: ${deleted} torrents excedentes se eliminarían (DRY_RUN; no se borró nada)`);
+  } else {
+    log.info(`Deduplicador: ${deleted} torrents excedentes eliminados`);
+  }
+  return {
+    scanned,
+    skippedNoId,
+    fallbackTitleRows,
+    ambiguousTitleLinks,
+    groups: groupCount,
+    groupsWithDuplicates,
+    deleted,
+    ...(config.dryRun ? { plannedDeletes: deleted } : {}),
+    skippedUnknownEpisode: unknownEpisodeRows,
+  };
 }

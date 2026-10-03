@@ -55,6 +55,23 @@ test('config: un STEPS inválido se reporta al validar, no al importar', async (
   }
 });
 
+test('config: dry-run seguro y fallback de deduplicación activado por defecto', async () => {
+  const previousDryRun = process.env.DRY_RUN;
+  const previousFallback = process.env.DEDUP_FALLBACK_TITLE_KEY;
+  delete process.env.DRY_RUN;
+  delete process.env.DEDUP_FALLBACK_TITLE_KEY;
+  try {
+    const { config: fresh } = await import('../src/config.js?dedupe-defaults=1');
+    assert.equal(fresh.dryRun, true, 'la ejecución local debe simular por seguridad');
+    assert.equal(fresh.dedupe.fallbackTitleKey, true, 'dedupe debe incluir filas sin IDs por título');
+  } finally {
+    if (previousDryRun === undefined) delete process.env.DRY_RUN;
+    else process.env.DRY_RUN = previousDryRun;
+    if (previousFallback === undefined) delete process.env.DEDUP_FALLBACK_TITLE_KEY;
+    else process.env.DEDUP_FALLBACK_TITLE_KEY = previousFallback;
+  }
+});
+
 test('config: un LOG_LEVEL inválido se avisa sin romper la ejecución', async () => {
   const previous = process.env.LOG_LEVEL;
   process.env.LOG_LEVEL = 'verbose';

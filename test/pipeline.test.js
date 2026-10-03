@@ -178,6 +178,7 @@ test('DRY_RUN no modifica nada', async () => {
   const dry = baseConfig({ dryRun: true });
   const res = await runDeduplicator(createDb(dry, { client }), dry, silentLog);
   assert.ok(res.deleted > 0);
+  assert.equal(res.plannedDeletes, res.deleted, 'el resultado distingue la simulación de un borrado real');
   assert.equal(store2.tables.torrents.length, before);
 });
 

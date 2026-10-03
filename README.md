@@ -13,7 +13,7 @@ Está pensado para ejecutarse en **GitHub Actions** de forma programada. Requier
 | 3 | `dead`      | Borra torrents con `seeders = 0` y `updated_at` con más de 30 días. |
 | 4/5 | `normalize` | Parser inteligente sobre `title` → `title_text` (título limpio), `type`, `season`/`episode`/`absolute_episode`, `codec`, `quality`; arrays `audio`/`subtitles` en minúsculas, canónicos, sin duplicados ni basura. |
 | 6 | `enrich`    | Para huérfanos: **la vía más barata primero**. Si la fila ya trae `imdb_id`, TMDB `/find` da el `tmdb_id` exacto en 1 llamada (sin homónimos); si ya trae otro ID externo, los mappings de Kitsu (anilist↔kitsu↔mal) dan el resto sin gastar cuota de AniList. Sin IDs: **TMDB primero** (si hay API key) → `tmdb_id` + `imdb_id`; en anime después AniList (GraphQL) + Kitsu → `anilist_id`, `mal_id`, `kitsu_id`. Una consulta por obra, no por torrent; validación por similitud de título + año. Si TMDB no encuentra el anime con las variantes del parser, reintenta al final con el título canónico de AniList/Kitsu. Si AniList está saturado (429), Kitsu y TMDB resuelven igualmente (los IDs de AniList/MAL se rescatan vía mappings de Kitsu). |
-| 7 | `dedupe`    | Agrupa por obra (`imdb_id` / `tmdb_id` / `anilist_id` / `kitsu_id`, unidos con union-find) + episodio y conserva **sólo el mejor `spanish` y el mejor `english`**. Si el episodio no se puede identificar, no borra nada; entre doblaje y VOSE casi empatados gana el doblaje. |
+| 7 | `dedupe`    | Agrupa por IDs y, por defecto, también por título normalizado + año para enlazar filas con/sin IDs; separa por episodio y conserva **como máximo 1 `spanish` y 1 `english`**. Si el episodio no se puede identificar, no borra nada; entre doblaje y VOSE casi empatados gana el doblaje. |
 
 Sólo se escriben en la BD las filas que realmente cambian. `DRY_RUN=true` ejecuta todo sin modificar nada.
 
@@ -174,15 +174,25 @@ enriquecedor:
 `.github/workflows/torrents-maintenance.yml` se ejecuta a diario (04:15 UTC) y bajo demanda.
 Usa `concurrency` para evitar solapes y publica un resumen en la pestaña del job.
 
-**Recomendación:** la primera vez lánzalo con `dry_run = true` y `log_level = debug` y revisa el log.
+- **Cron diario:** por defecto ejecuta únicamente `dedupe` y aplica los borrados. Así no activa los
+  filtros adulto/tamaño/torrents muertos sin que lo configures. Para que el cron simule, crea la
+  variable de repositorio `DRY_RUN=true`.
+- **Ejecución manual:** viene preseleccionada en `steps=dedupe` y es segura por defecto
+  (`dry_run=true`). Revisa primero con `log_level=debug`; luego pon `dry_run=false` para aplicar sólo
+  esos borrados. Si defines `STEPS` como variable del repositorio, el cron usa esa lista pero vuelve a
+  simulación por seguridad, salvo que también pongas `DRY_RUN=false`.
+
+Antes de la primera eliminación, revisa el log de una simulación con `steps=dedupe`, `dry_run=true` y
+`log_level=debug`. Los borrados en Supabase son permanentes; comprueba los ejemplos de filas que marca.
 
 ### Ejecución local
 
 ```bash
 npm ci
 cp .env.example .env   # rellena credenciales; el script carga `.env` solo (sin pisar el entorno)
-npm run dry-run                       # simula
-STEPS=normalize,dedupe npm start      # ejecuta sólo esos pasos
+npm run dry-run                       # simula (no borra ni actualiza)
+STEPS=dedupe DRY_RUN=true npm start   # previsualiza sólo los duplicados
+STEPS=dedupe DRY_RUN=false npm start  # aplica sólo las eliminaciones de duplicados
 npm run parse -- "[SubsPlease] Sousou no Frieren - 09 (1080p) [ABCDEF12].mkv"   # depurar el parser
 npm test
 ```
@@ -193,7 +203,7 @@ Todas las opciones están documentadas en [`.env.example`](.env.example) y `src/
 
 | Variable | Defecto | Efecto |
 |----------|---------|--------|
-| `DRY_RUN` | `false` | No escribe nada |
+| `DRY_RUN` | `true` en local/manual; el cron sólo deduplica con escritura real por defecto | `true` simula; `false` aplica los cambios de los pasos elegidos |
 | `STEPS` | `all` | Subconjunto de pasos (`adult,size,dead,normalize,enrich,dedupe`) |
 | `MIN_MOVIE_MB` / `MIN_SERIES_MB` | `150` / `30` | Umbrales anti-fakes |
 | `DEAD_AFTER_DAYS` | `30` | Antigüedad para purgar torrents con 0 seeders |
@@ -202,6 +212,7 @@ Todas las opciones están documentadas en [`.env.example`](.env.example) y `src/
 | `ENRICH_MAX_LOOKUPS` | `300` | Obras resueltas vía API por ejecución (el resto, en la siguiente) |
 | `DEDUP_OTHER_LANGUAGE_POLICY` | `delete` | `keep` para no tocar torrents en otros idiomas (francés, alemán…) |
 | `DEDUP_UNKNOWN_LANGUAGE_AS` | `english` | Grupo para torrents sin información de idioma (`english`/`spanish`/`keep`) |
+| `DEDUP_FALLBACK_TITLE_KEY` | `true` | Enlaza filas con/sin IDs si coinciden título normalizado, tipo y año; `false` desactiva ese fallback |
 | `MAX_DELETE_RATIO` | `0.95` | Aborta un paso que quiera borrar más de ese % de filas evaluadas (no se aplica por debajo de 10 filas evaluadas: en tablas diminutas el porcentaje es ruido) |
 
 ## El parser de títulos
@@ -243,13 +254,20 @@ conserva el doblaje. Fuera de ese margen mandan los seeders: un VOSE con muchos 
 y un doblaje con cuatro seeders puede que no.
 
 Grupos de idioma: **spanish** = audio castellano/latino **o** subtítulos en español; **english** =
-audio o subtítulos en inglés. Un torrent dual puede ganar ambos grupos (se conserva una sola fila).
+audio o subtítulos en inglés. Por cada película/episodio conserva **como máximo una fila española y
+una inglesa**; un torrent dual puede cubrir ambos grupos (se conserva una sola fila).
 Los torrents sin información de idioma se asignan al grupo `DEDUP_UNKNOWN_LANGUAGE_AS` (por defecto
 `english`, que es lo habitual en releases sin etiquetar). Los que tienen audio y subtítulos
 explícitos en otros idiomas se eliminan (`DEDUP_OTHER_LANGUAGE_POLICY=delete`) o se conservan.
 Si en un grupo no queda ningún superviviente español/inglés, se conserva el mejor de todos modos:
 dos copias en francés no se borran mutuamente (una sola copia tampoco se toca). Un pack
 `S01E01-E10` no comparte clave con el episodio 1 suelto.
+
+`DEDUP_FALLBACK_TITLE_KEY=true` (defecto) también agrupa filas sin IDs —e incluso una fila con ID
+con otra sin ID— si coincide el tipo, el título normalizado y el año cuando el parser lo encuentra.
+Sólo cruza el alias con IDs si hay un único grupo externo posible; ante títulos ambiguos conserva las
+filas. Esto permite deduplicar aunque falten `imdb_id`/`tmdb_id`/IDs de anime. Se puede poner en
+`false` para desactivar el fallback; `DRY_RUN` y `LOG_LEVEL=debug` permiten revisar antes de borrar.
 
 **Cuando no se sabe el episodio, no se borra nada**: si el título no permite identificar el
 episodio (`full` en la clave interna), dos releases de la misma obra no se consideran duplicados,
