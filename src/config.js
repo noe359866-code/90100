@@ -218,8 +218,11 @@ export const config = Object.freeze({
     otherLanguagePolicy: (env.DEDUP_OTHER_LANGUAGE_POLICY || 'delete').toLowerCase(),
     /** Grupo al que se asignan torrents sin información de idioma: `english` | `spanish` | `keep`. */
     unknownLanguageAs: (env.DEDUP_UNKNOWN_LANGUAGE_AS || 'english').toLowerCase(),
-    /** Agrupar también torrents sin IDs usando el título limpio + año. */
-    fallbackTitleKey: toBool(env.DEDUP_FALLBACK_TITLE_KEY, false),
+    /**
+     * Unir por título normalizado + año también sirve de puente cuando unas filas
+     * tienen IDs externos y otras no. Se puede desactivar si hay títulos ambiguos.
+     */
+    fallbackTitleKey: toBool(env.DEDUP_FALLBACK_TITLE_KEY, true),
     /** Peso de los seeders en la puntuación (log2). */
     seederWeight: Math.max(toFloat(env.DEDUP_SEEDER_WEIGHT, 20), 0),
   },

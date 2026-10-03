@@ -29,10 +29,11 @@ const row = (id, title, extra = {}) => ({
   updated_at: '2026-01-01', ...extra,
 });
 
-const run = async (rows) => {
+const run = async (rows, dedupeOverrides = {}) => {
+  const cfg = config(dedupeOverrides);
   const { client, store } = createFakeSupabase(rows.map((r) => ({ ...r })), { rpc: false });
-  const db = createDb(config(), { client });
-  const result = await runDeduplicator(db, config(), silentLog);
+  const db = createDb(cfg, { client });
+  const result = await runDeduplicator(db, cfg, silentLog);
   return { result, quedan: store.tables.torrents.map((r) => r.id) };
 };
 
@@ -66,6 +67,71 @@ test('dedupe: el COMPLETE explícito sí se agrupa (hay información suficiente)
   ]);
   assert.equal(result.deleted, 1, 'dos packs completos de la misma obra son duplicados');
   assert.deepEqual(quedan, [1]);
+});
+
+const noIds = { imdb_id: null, tmdb_id: null, anilist_id: null, kitsu_id: null, mal_id: null };
+
+test('dedupe: sin IDs deja como máximo 1 español y 1 inglés usando título+año', async () => {
+  const { result, quedan } = await run([
+    row(1, 'Film 2023 1080p BluRay x264 Castellano', { ...noIds, type: 'movie', seeders: 100 }),
+    row(2, 'Film 2023 720p WEB-DL Latino', { ...noIds, type: 'movie', seeders: 10 }),
+    row(3, 'Film 2023 1080p BluRay x264 English', { ...noIds, type: 'movie', seeders: 80 }),
+    row(4, 'Film 2023 720p WEB-DL English', { ...noIds, type: 'movie', seeders: 5 }),
+  ], { fallbackTitleKey: true });
+  assert.equal(result.deleted, 2);
+  assert.equal(result.fallbackTitleRows, 4);
+  assert.deepEqual(quedan, [1, 3]);
+});
+
+test('dedupe: el título enlaza una fila con ID a otra sin ID, pero respeta el año', async () => {
+  const { result, quedan } = await run([
+    row(1, 'Pelicula (2020) 1080p Latino', { type: 'movie', imdb_id: 'tt2000', seeders: 50 }),
+    row(2, 'Pelicula 2020 720p Castellano', { ...noIds, type: 'movie', seeders: 20 }),
+    row(3, 'Pelicula 2021 1080p English', { ...noIds, type: 'movie', seeders: 10 }),
+  ], { fallbackTitleKey: true });
+  assert.equal(result.deleted, 1);
+  assert.deepEqual(quedan.sort(), [1, 3], '2020 se deduplica; la obra de 2021 queda aparte');
+});
+
+test('dedupe: no fusiona IDs externos distintos sólo por compartir un título', async () => {
+  const { result, quedan } = await run([
+    row(1, 'Pelicula 2020 1080p Castellano', { type: 'movie', imdb_id: 'tt2001' }),
+    row(2, 'Pelicula 2020 720p Castellano', { type: 'movie', imdb_id: 'tt2002' }),
+  ], { fallbackTitleKey: true });
+  assert.equal(result.deleted, 0, 'el puente por título sólo se usa si hay una fila sin IDs');
+  assert.deepEqual(quedan.sort(), [1, 2]);
+});
+
+test('dedupe: alias ambiguo no conecta dos IDs externos distintos', async () => {
+  const { result, quedan } = await run([
+    row(1, 'Pelicula 2020 1080p Castellano', { type: 'movie', imdb_id: 'tt3001' }),
+    row(2, 'Pelicula 2020 720p Latino', { type: 'movie', imdb_id: 'tt3002' }),
+    row(3, 'Pelicula 2020 1080p English', { ...noIds, type: 'movie' }),
+  ], { fallbackTitleKey: true });
+  assert.equal(result.deleted, 0);
+  assert.equal(result.ambiguousTitleLinks, 1);
+  assert.deepEqual(quedan.sort(), [1, 2, 3]);
+});
+
+test('dedupe: sin IDs mantiene la separación entre episodios', async () => {
+  const { result, quedan } = await run([
+    row(1, 'My Show S01E01 1080p Castellano', { ...noIds, type: 'series', seeders: 100 }),
+    row(2, 'My Show S01E01 720p Castellano', { ...noIds, type: 'series', seeders: 5 }),
+    row(3, 'My Show S01E02 1080p Castellano', { ...noIds, type: 'series', seeders: 100 }),
+    row(4, 'My Show S01E02 720p Castellano', { ...noIds, type: 'series', seeders: 5 }),
+  ], { fallbackTitleKey: true });
+  assert.equal(result.deleted, 2);
+  assert.deepEqual(quedan, [1, 3], 'queda una copia de cada episodio, no una sola de toda la serie');
+});
+
+test('dedupe: títulos de serie sin episodio siguen protegidos', async () => {
+  const { result, quedan } = await run([
+    row(1, 'Mi Serie 1080p WEB-DL x264', { ...noIds, type: 'series', seeders: 100 }),
+    row(2, 'Mi Serie 720p HDTV XviD', { ...noIds, type: 'series', seeders: 5 }),
+  ], { fallbackTitleKey: true });
+  assert.equal(result.deleted, 0);
+  assert.equal(result.skippedUnknownEpisode, 2);
+  assert.deepEqual(quedan.sort(), [1, 2]);
 });
 
 // ---------------------------------------------------------------------------

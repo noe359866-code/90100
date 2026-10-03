@@ -7,13 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Simular sin escribir en la base de datos'
+        description: 'Simular sin escribir (true); false aplica los cambios de los pasos elegidos'
         type: boolean
         default: true
       steps:
-        description: 'Pasos a ejecutar (all | adult,size,dead,normalize,enrich,dedupe)'
+        description: 'Pasos a ejecutar (usa dedupe para borrar sólo repetidos; all ejecuta todo)'
         type: string
-        default: 'all'
+        default: 'dedupe'
       log_level:
         description: 'Nivel de log'
         type: choice
@@ -67,10 +67,12 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY || vars.TMDB_API_KEY || '' }}
 
           # --- Parámetros de ejecución ---
-          # Simulación segura por defecto en ejecución programada y manual.
-          # Para escribir, desmarca dry_run en ejecución manual o configura DRY_RUN=false.
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && 'true' || 'false') || vars.DRY_RUN || 'true' }}
-          STEPS: ${{ github.event_name == 'workflow_dispatch' && inputs.steps || vars.STEPS || 'all' }}
+          # Manual: simulación por defecto; puedes elegir steps=dedupe y dry_run=false.
+          # Cron: sólo dedupe y escritura real por defecto. Para mantenerlo en simulación,
+          # configura la variable de repositorio DRY_RUN=true. Si defines STEPS en Variables,
+          # la simulación vuelve a ser la opción segura salvo que también definas DRY_RUN=false.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && 'true' || 'false') || vars.DRY_RUN || (github.event_name == 'schedule' && vars.STEPS == '' && 'false') || 'true' }}
+          STEPS: ${{ github.event_name == 'workflow_dispatch' && inputs.steps || vars.STEPS || (github.event_name == 'schedule' && 'dedupe') || 'all' }}
           LOG_LEVEL: ${{ github.event_name == 'workflow_dispatch' && inputs.log_level || vars.LOG_LEVEL || 'info' }}
           ENRICH_MAX_LOOKUPS: ${{ github.event_name == 'workflow_dispatch' && inputs.enrich_max_lookups || vars.ENRICH_MAX_LOOKUPS || '300' }}
           # Las etapas posteriores no deben ejecutarse si una etapa falla.
@@ -108,6 +110,6 @@ jobs:
           TMDB_RPS: ${{ vars.TMDB_RPS || '20' }}
           DEDUP_OTHER_LANGUAGE_POLICY: ${{ vars.DEDUP_OTHER_LANGUAGE_POLICY || 'delete' }}
           DEDUP_UNKNOWN_LANGUAGE_AS: ${{ vars.DEDUP_UNKNOWN_LANGUAGE_AS || 'english' }}
-          DEDUP_FALLBACK_TITLE_KEY: ${{ vars.DEDUP_FALLBACK_TITLE_KEY || 'false' }}
+          DEDUP_FALLBACK_TITLE_KEY: ${{ vars.DEDUP_FALLBACK_TITLE_KEY || 'true' }}
           DEDUP_SEEDER_WEIGHT: ${{ vars.DEDUP_SEEDER_WEIGHT || '20' }}
         run: npm start
